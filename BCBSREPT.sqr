@@ -1,0 +1,2790 @@
+!***********************************************************************
+!                                                                      *
+!               Confidentiality Information:                           *
+!                                                                      *
+! This module is the confidential and proprietary information of       *
+! PeopleSoft, Inc.; it is not to be copied, reproduced, or transmitted *
+! in any form, by any means, in whole or in part, nor is it to be used *
+! for any purpose other than that for which it is expressly provided   *
+! without the written permission of PeopleSoft.                        *
+!                                                                      *
+! Copyright (c) 1988-1993 PeopleSoft, Inc. All Rights Reserved         *
+!                                                                      *
+!*****************************************************************************
+!  1/1/2008 CRP - New version that will process benefit plan 12 - 
+!                  Medical/Dental for Blue Cross Blue Shield
+!  10/1/2008 CRP - HCMS490 Added code to only send terminated/waived 
+!                  row 1 time
+!  1/18/2013 CRP   Remove check for - in fix-name function
+!  2/09/2015 PRJ  Changed the PS_PERSONAL_DATA table to now use PS_Personal_Dt_Fst HCMS-1009
+!  5/20/2015 CRP Changed run control table to cru_run_control. 9.2 modified lenght of field
+!  8/27/2015 PRJ  HCMS-1152 Commented out the (W) Waived output since Jim Porter says BCBS does not want the data from the waived employees
+! 12/3/2015  CRP          Made changes to file layout for new health provider bcbs of sc (benefitfocus)
+! 11/18/2016 CRP  HCMS-1373  Add new changes for METLIFE Dental.
+! 02/24/2017 CRP  HCMS1407 Add new function to select mail address for USA staff, use HOME address for INTL, which will then use 100 Lake Hart
+!*****************************************************************************
+
+#include 'setenv.sqc'  !Set environment
+#Include 'usarpt.sqc'  !Variables specific to USA
+
+begin-report
+  do Initialization
+  do Report
+  do Reset
+  if #prcs_process_instance > 0
+    do Update-Prcs-Run-Status 
+  end-if
+end-report
+
+!***********************************************************************
+!  PROC INITIALIZATION
+!       Initialize
+!***********************************************************************
+
+BEGIN-PROCEDURE Initialization
+  let #counter = 0
+  do Init-DateTime
+  do Init-Number
+  move 'BCBS' to $ReportID
+  move 'Download to BCBS' to $ReportTitle
+  display ' '
+  display $ReportTitle
+  display ' '
+  do Define-Prcs-Vars
+  do Get-Run-Control-Parms
+  do Get-Current-DateTime
+  do Format-datetime ($AsOfToday, $todayDate, {DEFCMP}, '', '')
+  let $year = substr($todayDate,1,2)
+  move $todayDate to #todayDate
+
+ !---------Open file for writing
+  do Find-File-Directory
+  
+  let $Filename = $File-Directory || 'Cru_BCBSSC_' || substr($ReportDate,1,2)||substr($ReportDate,4,2)||
+                             substr($ReportDate,7,4)||'.txt'
+!  let $Filename_metlife = $File-Directory || 'METLIFE_' || substr($ReportDate,1,2)||substr($ReportDate,4,2)||
+!                             substr($ReportDate,7,4)||'.txt'
+!  let $Filename_metlife = $File-Directory || 'CAMPUSDN_DENT_31739_' || substr($ReportDate,1,2)||substr($ReportDate,4,2)|| 
+!                              substr($ReportDate,7,4)||'.txt'
+  let $Filename_metlife = $File-Directory || 'campusdn_dent_31739' ||'.dat'
+  show 'Filename: ' $Filename
+  show 'Filename_METLIFE: ' $Filename_metlife
+  ! The following file path and name is used for testing purposes for the HR Upgrade
+  ! let $Filename = $File-Directory || substr($ReportDate,1,2)||substr($ReportDate,4,2)||
+  !                           substr($ReportDate,7,2)||'TST.DAT'
+  display $Filename
+  show 'File to send: ' $Filename
+  open $Filename as 1
+  for-writing
+  record=500:fixed
+  status=#open1
+  if #open1 = -1
+     display 'BCBS File open failed'
+     stop
+  end-if
+  !
+  !UCCI File Open
+  display $Filename_metlife
+  show 'File to send Metlife: ' $Filename_metlife
+  open $Filename_metlife as 2
+  for-writing
+  record=500:fixed
+  status=#open1
+  if #open1 = -1
+     display 'Metlife File open failed'
+     stop
+  end-if
+
+ !---------Create array to store dependent information
+  Create-array name=deps size=20
+     field = first:char
+     field = middle:char
+     field = last:char
+     field = relation:char
+     field = bday:char
+     field = sex:char
+     field = ssn:char
+     field = age:integer
+     field = disabled:char
+     field = student:char
+     field = elig_date:char
+END-PROCEDURE
+
+#Include 'SetUp01.sqc'  !printer and page-size initialization
+
+begin-HEADING 5
+  #Include 'StdHdg01.sqc'
+end-HEADING
+
+!***********************************************************************
+!  PROC REPORT
+!         Main Procedure
+!***********************************************************************
+
+BEGIN-PROCEDURE Report
+ !--Get last time this program has been run
+BEGIN-SELECT
+to_char(sysdate,'MM/DD/YYYY')                        &current_date
+to_char(sysdate,'HH:MM:SS')                        &current_time
+to_char(sysdate,'DD-MON-YYYY HH24:MI:SS')            &sysdate2
+to_char(RC.Audit_Stamp,'DD-MON-YYYY HH24:MI:SS')     &OldDateTime
+to_char(sysdate,'YYYYMMDD') - 7                      &run_date_minus_seven    !HCMS490 CRP
+to_char(sysdate,'YYMMDD')                            &header_date !bcbssc crp
+to_char(sysdate,'HHMM')                              &header_time !bcbssc crp
+to_char(sysdate,'YYYYMMDD')                            &header_date_be !bcbssc crp
+to_char(sysdate,'HHMMSSDD')                            &header_time_be !bcbssc crp
+FROM PS_CRU_RUN_CONTROL RC			                 !CRP HCM 9.2 upgrade, new run control CRU_RUN_CONTROL
+WHERE RC.CRU_JOB_RC = 'GW' and RC.Audit_Stamp = (Select Max(R.Audit_Stamp) from
+         ps_cru_run_control R where R.cru_job_rc = 'GW' and R.Audit_stamp <= sysdate)
+END-SELECT
+   move &sysdate2    to $CurDateTime
+   move &OldDateTime to $OldDateTime
+  ! Let $CurDateTime = '14-JAN-1997 15:27:04'
+  ! Let $OldDateTime = '30-DEC-1996 11:40:00'
+   Display $OldDateTime
+   Display $CurDateTime
+   Display &run_date_minus_seven
+
+ !--Get unique people who have had a change since the last time that the
+ !--program was run. Actually gets Primary and Secondary employees here
+ !--the procedure Get-person makes sure that only Primary employees are sent
+ !--by verifying that the person is enrolled in a Health plan and has
+ !--elected coverage (only Primary employees have that benefit)
+
+
+let #process_count = 0
+
+
+ do select-employees
+
+end-procedure
+
+begin-procedure select-employees
+
+  !** CRP Add header function bcbssc
+  do write-header
+  !**********************************
+   
+
+BEGIN-SELECT !Loops=20
+    let  #process_count =  #process_count + 1
+Emplid
+
+   Let $emplid = &Emplid
+    !show '*******************************************************'
+    !show 'Emplid: ' $emplid
+    !show '*******************************************************'
+   do Get-Person
+
+FROM PS_Audit_Pers_data
+WHERE audit_stamp <= to_date($CurDateTime,'DD-MON-YYYY HH24:MI:SS') and
+      audit_stamp >  to_date($OldDateTime,'DD-MON-YYYY HH24:MI:SS')
+      and emplid not in ('000555540','000544977','000107187','000516038')  !remove when fixed
+#debuga AND emplid in ('000030367','000043884','000245730','000505981','000506065','000466560','000561275','000561542','000047523','000410800','000411172','000388186','000390447','000396763','000531200','000531920','000533774','000351316','000368130','000368408','000377873','000393322','000420090','000533781','000543761','000420538','000441087','000443476','000422037','000427753','000436550','000037479','000122082','000105923','000105923','000259597','000255015','000025975','000390461S')
+#debuga or emplid in  ('000530721','000576932','000543932','000578926','000554569','000056903','000113076','000002987','000119442','000257735','000379205','000584555','000452450','000553314','000008164','000027015','000581826','006207301','000000616','000000790','006209680','006209708','000000801','000001287','006209601','006209633','008980019','000573587','000589470','000542912','000554195','000588589','000588952','000589901','000520360','000506058','000506072')
+#debuga or emplid in  ('000580489','000581744','000028462','000502743','000589125','000540224')
+!and emplid in ('000664752','000011819','000901379','000424586','000735620','000018977','000516390','000421608','000541002','000005129','000600931')
+!and emplid in ('000611707','000611707S')
+UNION SELECT
+substr(Emplid,1,9)
+FROM PS_Audit_addresses
+WHERE audit_stamp <= to_date($CurDateTime,'DD-MON-YYYY HH24:MI:SS') and
+      audit_stamp >  to_date($OldDateTime,'DD-MON-YYYY HH24:MI:SS')
+      and emplid not in ('000555540','000544977','000107187','000516038')  !remove when fixed
+#debuga AND emplid in ('000030367','000043884','000245730','000505981','000506065','000466560','000561275','000561542','000047523','000410800','000411172','000388186','000390447','000396763','000531200','000531920','000533774','000351316','000368130','000368408','000377873','000393322','000420090','000533781','000543761','000420538','000441087','000443476','000422037','000427753','000436550','000037479','000122082','000105923','000105923','000259597','000255015','000025975','000390461S')
+#debuga or emplid in  ('000530721','000576932','000543932','000578926','000554569','000056903','000113076','000002987','000119442','000257735','000379205','000584555','000452450','000553314','000008164','000027015','000581826','006207301','000000616','000000790','006209680','006209708','000000801','000001287','006209601','006209633','008980019','000573587','000589470','000542912','000554195','000588589','000588952','000589901','000520360','000506058','000506072')
+#debuga or emplid in  ('000580489','000581744','000028462','000502743','000589125','000540224')
+!and emplid in ('000664752','000011819','000901379','000424586','000735620','000018977','000516390','000421608','000541002','000005129','000600931')
+!and emplid in ('000611707','000611707S')
+UNION SELECT
+A1.EMPLID
+FROM PS_Addresses A1
+WHERE A1.ADDRESS_TYPE = 'MAIL'   !FEW 10/01/2001 Applied table update
+      AND A1.EFF_STATUS = 'A'
+      AND A1.EFFDT =
+        (SELECT MAX(EFFDT) FROM PS_ADDRESSES WHERE
+            EMPLID    = A1.EMPLID AND
+            ADDRESS_TYPE = 'MAIL' AND
+            EFF_STATUS = 'A' AND
+            EFFDT between to_date($OldDateTime,'DD-MON-YYYY HH24:MI:SS') and
+                 to_date($CurDateTime,'DD-MON-YYYY HH24:MI:SS'))
+and emplid not in ('000555540','000544977','000107187','000516038')  !remove when fixed
+#debuga AND emplid in ('000030367','000043884','000245730','000505981','000506065','000466560','000561275','000561542','000047523','000410800','000411172','000388186','000390447','000396763','000531200','000531920','000533774','000351316','000368130','000368408','000377873','000393322','000420090','000533781','000543761','000420538','000441087','000443476','000422037','000427753','000436550','000037479','000122082','000105923','000105923','000259597','000255015','000025975','000390461S')
+#debuga or emplid in  ('000530721','000576932','000543932','000578926','000554569','000056903','000113076','000002987','000119442','000257735','000379205','000584555','000452450','000553314','000008164','000027015','000581826','006207301','000000616','000000790','006209680','006209708','000000801','000001287','006209601','006209633','008980019','000573587','000589470','000542912','000554195','000588589','000588952','000589901','000520360','000506058','000506072')
+#debuga or emplid in  ('000580489','000581744','000028462','000502743','000589125','000540224')
+!and emplid in ('000664752','000011819','000901379','000424586','000735620','000018977','000516390','000421608','000541002','000005129','000600931')
+!and emplid in ('000611707','000611707S')
+UNION SELECT
+Emplid
+FROM PS_Audit_names
+WHERE audit_stamp <= to_date($CurDateTime,'DD-MON-YYYY HH24:MI:SS') and
+      audit_stamp >  to_date($OldDateTime,'DD-MON-YYYY HH24:MI:SS')
+and emplid not in ('000555540','000544977','000107187','000516038')  !remove when fixed
+#debuga AND emplid in ('000030367','000043884','000245730','000505981','000506065','000466560','000561275','000561542','000047523','000410800','000411172','000388186','000390447','000396763','000531200','000531920','000533774','000351316','000368130','000368408','000377873','000393322','000420090','000533781','000543761','000420538','000441087','000443476','000422037','000427753','000436550','000037479','000122082','000105923','000105923','000259597','000255015','000025975','000390461S')
+#debuga or emplid in  ('000530721','000576932','000543932','000578926','000554569','000056903','000113076','000002987','000119442','000257735','000379205','000584555','000452450','000553314','000008164','000027015','000581826','006207301','000000616','000000790','006209680','006209708','000000801','000001287','006209601','006209633','008980019','000573587','000589470','000542912','000554195','000588589','000588952','000589901','000520360','000506058','000506072')
+#debuga or emplid in  ('000580489','000581744','000028462','000502743','000589125','000540224')
+!and emplid in ('000664752','000011819','000901379','000424586','000735620','000018977','000516390','000421608','000541002','000005129','000600931')
+!and emplid in ('000611707','000611707S')
+UNION SELECT 
+Emplid
+FROM PS_Audit_employmnt
+WHERE audit_stamp <= to_date($CurDateTime,'DD-MON-YYYY HH24:MI:SS') and
+      audit_stamp >  to_date($OldDateTime,'DD-MON-YYYY HH24:MI:SS')
+and emplid not in ('000555540','000544977','000107187','000516038')  !remove when fixed
+#debuga AND emplid in ('000030367','000043884','000245730','000505981','000506065','000466560','000561275','000561542','000047523','000410800','000411172','000388186','000390447','000396763','000531200','000531920','000533774','000351316','000368130','000368408','000377873','000393322','000420090','000533781','000543761','000420538','000441087','000443476','000422037','000427753','000436550','000037479','000122082','000105923','000105923','000259597','000255015','000025975','000390461S')
+#debuga or emplid in ('000530721','000576932','000543932','000578926','000554569','000056903','000113076','000002987','000119442','000257735','000379205','000584555','000452450','000553314','000008164','000027015','000581826','006207301','000000616','000000790','006209680','006209708','000000801','000001287','006209601','006209633','008980019','000573587','000589470','000542912','000554195','000588589','000588952','000589901','000520360','000506058','000506072')
+#debuga or emplid in ('000580489','000581744','000028462','000502743','000589125','000540224')
+!and emplid in ('000664752','000011819','000901379','000424586','000735620','000018977','000516390','000421608','000541002','000005129','000600931')
+!and emplid in ('000611707','000611707S')
+UNION SELECT
+Emplid
+FROM PS_Audit_Health
+WHERE audit_stamp <= to_date($CurDateTime,'DD-MON-YYYY HH24:MI:SS') and
+      audit_stamp >  to_date($OldDateTime,'DD-MON-YYYY HH24:MI:SS')
+and emplid not in ('000555540','000544977','000107187','000516038')  !remove when fixed
+#debuga AND emplid in ('000030367','000043884','000245730','000505981','000506065','000466560','000561275','000561542','000047523','000410800','000411172','000388186','000390447','000396763','000531200','000531920','000533774','000351316','000368130','000368408','000377873','000393322','000420090','000533781','000543761','000420538','000441087','000443476','000422037','000427753','000436550','000037479','000122082','000105923','000105923','000259597','000255015','000025975','000390461S')
+#debuga or emplid in ('000530721','000576932','000543932','000578926','000554569','000056903','000113076','000002987','000119442','000257735','000379205','000584555','000452450','000553314','000008164','000027015','000581826','006207301','000000616','000000790','006209680','006209708','000000801','000001287','006209601','006209633','008980019','000573587','000589470','000542912','000554195','000588589','000588952','000589901','000520360','000506058','000506072')
+#debuga or emplid in ('000580489','000581744','000028462','000502743','000589125','000540224')
+!and emplid in ('000664752','000011819','000901379','000424586','000735620','000018977','000516390','000421608','000541002','000005129','000600931')
+!and emplid in ('000611707','000611707S')
+UNION SELECT
+EMPLID
+FROM PS_Health_Benefit
+WHERE (EFFDT >= to_date('31-DEC-2007', 'DD-MON-YYYY') or COVERAGE_BEGIN_DT >= '01-JAN-2008') !*** CRP 6/20
+and emplid not in ('000555540','000544977','000107187','000516038')  !remove when fixed
+#debuga AND emplid in ('000030367','000043884','000245730','000505981','000506065','000466560','000561275','000561542','000047523','000410800','000411172','000388186','000390447','000396763','000531200','000531920','000533774','000351316','000368130','000368408','000377873','000393322','000420090','000533781','000543761','000420538','000441087','000443476','000422037','000427753','000436550','000037479','000122082','000105923','000105923','000259597','000255015','000025975','000390461S')
+#debuga or emplid in ('000530721','000576932','000543932','000578926','000554569','000056903','000113076','000002987','000119442','000257735','000379205','000584555','000452450','000553314','000008164','000027015','000581826','006207301','000000616','000000790','006209680','006209708','000000801','000001287','006209601','006209633','008980019','000573587','000589470','000542912','000554195','000588589','000588952','000589901','000520360','000506058','000506072')
+#debuga or emplid in ('000580489','000581744','000028462','000502743','000589125','000540224')
+!and emplid in ('000664752','000011819','000901379','000424586','000735620','000018977','000516390','000421608','000541002','000005129','000600931')
+!and emplid in ('000611707','000611707S')
+UNION SELECT
+Emplid
+FROM PS_Audit_dep_benef
+WHERE audit_stamp <= to_date($CurDateTime,'DD-MON-YYYY HH24:MI:SS') and
+      audit_stamp >  to_date($OldDateTime,'DD-MON-YYYY HH24:MI:SS')
+and emplid not in ('000555540','000544977','000107187','000516038')  !remove when fixed
+#debuga AND emplid in ('000030367','000043884','000245730','000505981','000506065','000466560','000561275','000561542','000047523','000410800','000411172','000388186','000390447','000396763','000531200','000531920','000533774','000351316','000368130','000368408','000377873','000393322','000420090','000533781','000543761','000420538','000441087','000443476','000422037','000427753','000436550','000037479','000122082','000105923','000105923','000259597','000255015','000025975','000390461S')
+#debuga or emplid in ('000530721','000576932','000543932','000578926','000554569','000056903','000113076','000002987','000119442','000257735','000379205','000584555','000452450','000553314','000008164','000027015','000581826','006207301','000000616','000000790','006209680','006209708','000000801','000001287','006209601','006209633','008980019','000573587','000589470','000542912','000554195','000588589','000588952','000589901','000520360','000506058','000506072')
+#debuga or emplid in ('000580489','000581744','000028462','000502743','000589125','000540224')
+!and emplid in ('000664752','000011819','000901379','000424586','000735620','000018977','000516390','000421608','000541002','000005129','000600931')
+!and emplid in ('000611707','000611707S')
+UNION SELECT
+Emplid
+FROM PS_Audit_hlth_dep
+WHERE audit_stamp <= to_date($CurDateTime,'DD-MON-YYYY HH24:MI:SS') and
+      audit_stamp >  to_date($OldDateTime,'DD-MON-YYYY HH24:MI:SS')
+and emplid not in ('000555540','000544977','000107187','000516038')  !remove when fixed
+#debuga AND emplid in ('000030367','000043884','000245730','000505981','000506065','000466560','000561275','000561542','000047523','000410800','000411172','000388186','000390447','000396763','000531200','000531920','000533774','000351316','000368130','000368408','000377873','000393322','000420090','000533781','000543761','000420538','000441087','000443476','000422037','000427753','000436550','000037479','000122082','000105923','000105923','000259597','000255015','000025975','000390461S')
+#debuga or emplid in ('000530721','000576932','000543932','000578926','000554569','000056903','000113076','000002987','000119442','000257735','000379205','000584555','000452450','000553314','000008164','000027015','000581826','006207301','000000616','000000790','006209680','006209708','000000801','000001287','006209601','006209633','008980019','000573587','000589470','000542912','000554195','000588589','000588952','000589901','000520360','000506058','000506072')
+#debuga or emplid in ('000580489','000581744','000028462','000502743','000589125','000540224')
+!and emplid in ('000664752','000011819','000901379','000424586','000735620','000018977','000516390','000421608','000541002','000005129','000600931')
+!and emplid in ('000611707','000611707S')
+END-SELECT
+
+!--Insert new Run-Control-Record
+!BEGIN-SQL   ********* CRP REMOVE
+!  Insert into ps_run_control values ('BC',
+!    to_date($CurDateTime,'DD-MON-YYYY HH24:MI:SS'));
+!END-SQL
+
+ do write-footer
+ Show 'Total Staff Processed    : ' $100_count     !total employess
+ Show 'Total Staff/Dep Processed: ' $total_count   !total Rows
+ Close 1
+END-PROCEDURE select-employees
+
+!***********************************************************************
+!  PROC Get-Person
+!       Gets people who have been changed recently and who have a
+!       PS_Benefit_partic record with a plan type of 12
+!***********************************************************************
+
+BEGIN-PROCEDURE Get-person
+show 'IN GET PERSON'
+BEGIN-SELECT
+sysdate                                 &sysdate
+P.emplid
+PN.NATIONAL_ID                          &ssn
+N.Last_name
+N.first_name
+N.middle_name
+P.sex
+to_char(A.EFFDT,'MM/DD/YYYY')                    &address_effdt
+A.ADDRESS1
+A.ADDRESS2
+A.ADDRESS3
+A.city
+A.state
+A.COUNTRY
+A.POSTAL
+P.mar_status
+   
+  move &P.mar_status to $mar_status
+  move &A.city to $city
+  move &A.state to $state
+  ! CMA code was added to here to protect someone's SSN.  They specifically requested it through Benefits
+  ! CRP BEGIN 10/16/2014 Removed code IF statement as requested from leora/Bubba
+  ! if &ssn = '558830956'
+  !  let $eessn = '000537694'
+  ! else
+    let $eessn = &ssn
+  ! end-if
+  ! CRP END 10/16/2014 Removed code as requested from leora/Bubba
+to_char(P.birthdate,'YYYYMMDD')           &birthdate
+to_char(P.mar_status_dt,'MM/DD/YYYY')       &mar_dt
+to_char(P.dt_of_death,'MM/DD/YYYY')         &death_dt
+to_char(E.hire_dt,'YYYYMMDD')           &hire_dt
+to_char(E.rehire_dt,'MM/DD/YYYY')         &rehire
+E.location                              &loc
+E.company                               &company
+E.state
+E.country_other
+EB.Benefit_Program                      &benefit_program
+E.Paygroup                              &paygroup
+E.Phone
+
+  !
+  do format-phone-zip (&E.Phone, $Phone)
+  !show 'Phone: ' $phone
+  !show 'In Get-Person: ' &P.EMPLID
+  move &loc to $Location
+  do Get-Location-Name
+  !show &P.emplid
+ !--This if guards against the Employees2 table sometime returning
+ !--multiple rows because of address information
+  if $oldEmplid <> &P.emplid
+
+   if &P.mar_status = 'M'
+      Let $mar_status = '2'
+   else
+      Let $mar_status = '1'
+   end-if
+
+ !--Take extra characters out of name and check if first name is only one
+ !--letter, if so send middle name, or is first name is made up of one letter
+ !--a space, and then the name. Send the rest of the name starting with the
+ !--third character
+  do fix-name(&N.first_name, $first_name)
+  do fix-name(&N.last_name, $last_name)
+  do fix-name(&N.middle_name, $middle_name)
+  if length($first_name) > 2 and substr($first_name,2,1) = ' '
+    let #temp = length($first_name) - 2
+    let $first_name = substr($first_name,3,#temp)
+  else
+    if length($first_name) = 1 !or substr($first_name,2,1) = ' '
+      let $first_name = $middle_name
+      let $middle_name = ' '
+    end-if
+  end-if
+   let $class = '001'
+
+  !--Format address and telephone information
+
+   Let $address = rtrim(&A.ADDRESS1,' ')
+   Let $address2 = rtrim(&A.ADDRESS2,' ')
+   Let $address3 = rtrim(&A.ADDRESS3,' ')
+ 
+   do format-phone-zip (&A.POSTAL, $POSTAL)
+   Let $POSTAL = rpad($POSTAL, 9, '0')
+   Let $country_cd = rtrim(&E.country_other,' ')
+  #debugab show 'COUNTRY ' $country_cd
+  !--Check rehire and hire dates
+
+     if (&rehire > &hire_dt)
+        Let $hire_dt = &rehire
+     else
+        Let $hire_dt = &hire_dt
+     end-if
+
+    do Get-Benefits
+    
+    if $cov_elect_wt <> 'SKIP'  ! if cov elect dt < 1/1/2008 and cov elect = W or T
+                                ! will skip creating row of data
+      
+      !show '****** COV ELECT DATE: ' $cov_elect_wt ' *** Waive :  ' #waive
+    if #Waive = 0
+       show &coverage_elect
+     Evaluate &coverage_elect
+     When = 'E'
+         do Write-2000   !crp bcbssc INS
+       !crp bcbssc INS  do Write-110
+       !crp bcbssc INS do Write-130
+       !crp bcbssc INS  do Write-135
+         #debugb show 'Num Deps: ' #num_deps
+        ! show #num_deps
+        if #num_deps > 0
+          if $found_dep = 'Y'
+              do Write-100-Dep
+          end-if  
+        end-if
+     break
+     When = 'T'
+    ! When = 'W'						! HCMS-1152 PRJ -- changes to no longer include W
+       let #julian_cov_dt = &julian_cov_dt                !HCMS490 CRP
+       let  #run_date_minus_seven = &run_date_minus_seven !HCMS490 CRP
+       show '**** Elect Dt: ' #run_date_minus_seven  '  -- ' #julian_cov_dt ' - ' &coverage_elect ' --- ' &N.Last_name
+       if #run_date_minus_seven < #julian_cov_dt  !HCMS490
+        show '**** Elect Dt: ' &cov_elect_dt '  -- ' &coverage_elect ' --- ' &N.Last_name
+         do Write-2000
+        ! do Write-110
+        ! do Write-130
+        ! do Write-135
+         #debugb show 'Num Deps: ' #num_deps
+         if #num_deps > 0
+            if $found_dep = 'Y'
+                do Write-100-Dep
+            end-if  
+         end-if
+      end-if
+    break
+    End-Evaluate
+    end-if
+
+     if #Waive = 1
+        Print &P.emplid (+1,1)
+        Print ' has WAIVED or TERMED coverage and is not included in tape' (0,+1)
+     end-if
+   else
+     show 'SKIP yes or no ***  ' $cov_elect_wt
+   end-if
+   Let $line     = ''
+   Let $depsLINE = ''
+   Let #num_deps = 0
+   Let #Waive    = 0
+   Let $oldEmplid = &P.emplid
+   Let $cancel_date = ' '
+   Let $cov_cancel_cd = ' '
+   Let $cov_cancel_cd_dep = ' '
+   Let $error = 'N'
+  end-if
+
+FROM PS_Addresses A, PS_Personal_Dt_Fst P, PS_Names N, PS_Employees2 E,						! PRJ 02/09/2015 changed table see Modification Log or HCMS-1009
+     PS_Ben_Prog_Partic EB, PS_PERS_NID PN
+WHERE PN.EMPLID = P.emplid
+     AND PN.COUNTRY = {NID_COUNTRY}
+     AND PN.PRIMARY_NID = 'Y'
+     AND P.emplid = $emplid        
+     AND A.EMPLID = P.emplid
+!*** CRP HCMS1407 2/22/2017     AND A.ADDRESS_TYPE = 'MAIL'   
+     AND A.ADDRESS_TYPE = 'HOME'   !*** CRP HCMS1407 2/22/2017 use home address
+     AND A.EFF_STATUS = 'A'
+     AND A.EFFDT =
+        (SELECT MAX(EFFDT) FROM PS_ADDRESSES WHERE
+            EMPLID    = A.EMPLID AND
+            ADDRESS_TYPE = 'HOME' AND     !*** CRP HCMS1407 2/22/2017 use home address
+            EFF_STATUS = 'A' AND
+            EFFDT <= SYSDATE + 60) 
+   AND P.emplid = N.emplid  
+   AND N.NAME_TYPE = 'PRI'
+  ! AND N.COUNTRY_NM_FORMAT = '001'
+   AND N.EFFDT =
+        (SELECT MAX(EFFDT) FROM PS_NAMES WHERE
+            EMPLID = N.EMPLID AND
+            NAME_TYPE = N.NAME_TYPE AND
+            COUNTRY_NM_FORMAT = N.COUNTRY_NM_FORMAT AND
+            EFFDT <= SYSDATE + 60) 
+  AND N.emplid = E.emplid
+  AND EB.Emplid    = E.Emplid
+  AND EB.EMPL_RCD = E.EMPL_RCD
+  AND EB.Effdt     = (Select max(effdt) from ps_ben_prog_partic
+                      where emplid = EB.emplid
+                        AND EMPL_RCD = EB.EMPL_RCD
+                        AND effdt <= sysdate + 60) 
+  AND exists (select BP.emplid from PS_Health_benefit BP 
+              where BP.emplid = P.emplid and BP.plan_type = '12'
+              and bp.effdt = (select MAX(effdt) from ps_health_benefit bp1
+			                  where bp1.emplid = bp.emplid
+							  and bp1.plan_type = bp.plan_type
+                              and (bp1.coverage_begin_dt >= '31-DEC-2007'  !*** CRP  6/20 made 12/31/07 instead of 1/1/2008
+                              and bp1.coverage_begin_dt <= SYSDATE + 60)
+                              )  
+              )
+
+END-SELECT
+
+END-PROCEDURE Get-Person
+
+!***********************************************************************
+!  PROC fix-name
+!       Takes extra characters out of the name
+!***********************************************************************
+
+BEGIN-PROCEDURE fix-name ($namePart, :$name)
+!#debugb show 'Namepart: ' $namepart
+   let $namePart = rtrim($namePart,' ')
+   Let #x = 1
+   Let $name = ''
+   Let #temp = length($namePart)
+   while (#x <= #temp)
+      Let $letter = substr($namePart,#x,1)
+      if ($letter <> '.' and $letter <> ',' and $letter <> '''')
+          ! *** 1/18/2013 CRP and $letter <> '-')
+         Let $name = $name || upper($letter)
+        
+      end-if
+      Add 1 to #x
+   end-while
+END-PROCEDURE
+
+!***********************************************************************
+!  PROC GET-BENEFITS
+!       Get the Benefits information for that person.  Original effdt
+!  is the original date that the person started receiving benefits.  Current
+!  effdt is the begin date of the current record from which they are now
+!  receiving benefits.  Cancel date is the date that they are no longer
+!  covered by benefits.  Because a person can change coverage codes, the
+!  Current effdt may change.  However, the original effdt should remain
+!  constant. The coverage code always needs to be gotten from the most
+!  current record where the person was receiving benefits
+!***********************************************************************
+
+BEGIN-PROCEDURE Get-Benefits
+  #debugb  show 'get-benefits'
+   Let #index = 0
+   Let #future= 0
+   Let #Eflag = 0
+   Let #WFlag = 0
+   Let $original_effdt = ''             !--Set to null so the dates don't get
+   Let $current_effdt  = ''             !--carried over to the next person
+   Let $coverage_code  = ''
+   Let $cov_cancel_dt_dep = ' '
+   Let $cov_elect_wt = ' '
+
+BEGIN-SELECT
+L.emplid,
+L.EMPL_RCD, L.BENEFIT_NBR, 
+L.effdt,
+L.benefit_plan
+L.plan_type                             &plan
+to_char(L.coverage_begin_dt,'MM/DD/YYYY') &cov_beg_dt
+to_char(L.coverage_begin_dt,'YYYYMMDD')   &julian_cov_dt
+to_char(L.coverage_begin_dt,'MMDDYYYY')   &metlife_cov_dt
+to_char(L.coverage_end_dt,'MM/DD/YYYY')   &cov_end_dt
+to_char(L.coverage_end_dt,'YYYYMMDD')   &julian_cov_end_dt
+to_char(L.coverage_elect_dt,'YYYYMMDD') &cov_elect_dt
+L.covrg_cd                              &cov_cd
+L.coverage_elect                      &coverage_elect
+  show &P.emplid
+  show '**** Eff: ' &L.effdt ' Cov Beg Dt: ' &cov_beg_dt '  Cov elect dt: ' &cov_elect_dt 'Cov Elect: ' &coverage_elect
+   evaluate &coverage_elect
+   when  = 'E'
+     !Let $cancel_date = '99999999'
+     Let $current_effdt  = &cov_beg_dt
+     Let $original_effdt = &cov_beg_dt
+     Let $coverage_code  = &cov_cd
+     Let $effdt          = &L.effdt
+     Let #empl           = &L.EMPL_RCD
+     Let $benNo          = &L.BENEFIT_NBR
+     let $benefit_plan   = &L.benefit_plan
+     
+     do Get-Coverage
+
+   break
+   when = 'W'
+   when = 'T'
+    if &cov_elect_dt >= '20080101'
+      Let $cancel_date  = &cov_beg_dt
+      Let $cov_cancel_cd = '01'
+      Let $cov_cancel_cd_dep = '01'
+      Let $cov_cancel_dt_dep = &cov_beg_dt
+      Let $valid_fetch = 'N'
+      do fetch-last-elect
+      if $valid_fetch = 'N'
+      !  let #Waive = 1
+        SHOW 'Termed employee not processed ' &L.EMPLID
+       
+      else
+         show 'Termed employee processed ' &L.EMPLID   ' SSN: ' $eessn
+      end-if
+    else
+      Let $cov_elect_wt = 'SKIP'     !Skip record, elect date before 1/1/2008
+     ! #debugb show $cov_elect_wt
+    end-if
+   break
+   end-evaluate
+   
+    #debugb show &p.emplid ' - ' &cov_beg_dt ' - ' &coverage_elect ' - CurrentDt: ' $current_effdt
+    
+FROM PS_Health_benefit L
+WHERE L.emplid = &P.emplid
+  AND L.plan_type = '12'
+  AND L.Effdt =
+    (select min(L1.effdt) from ps_health_benefit L1
+      where l1.effdt =
+       (select min(L2.effdt) from ps_health_benefit l2
+	   where L2.emplid = l.emplid and l2.empl_rcd=L.empl_rcd and l2.cobra_event_id=L.cobra_event_id
+           and l2.plan_type=L.plan_type and l2.benefit_nbr = L.benefit_nbr and l2.effdt > sysdate + 200)
+       or l1.effdt =
+       (select max(l3.effdt) from  ps_health_benefit l3
+            where l3.emplid=L.emplid and l3.empl_rcd=L.empl_rcd and l3.cobra_event_id=L.cobra_event_id
+            and L3.plan_type=L.plan_type and l3.benefit_nbr = L.benefit_nbr and l3.effdt <= sysdate + 200))
+ORDER by L.effdt desc
+
+END-SELECT
+END-PROCEDURE
+!--------------------------------------------------------------------------------------------
+!  procedure get-last-elect  -this proceduce fetches last coverage-elect code of 'E'
+!                             when coverage has been terminated or waived
+!--------------------------------------------------------------------------------------------
+BEGIN-PROCEDURE fetch-last-elect
+!show 'IN FETCH LAST ELECT'
+BEGIN-SELECT
+LL.emplid,
+LL.EMPL_RCD, LL.BENEFIT_NBR, LL.effdt
+LL.benefit_plan
+LL.plan_type                             &plan_lst
+
+to_char(LL.coverage_begin_dt,'YYYYMMDD') &cov_beg_dt_lst
+
+
+LL.covrg_cd                              &cov_cd_lst
+LL.coverage_elect                        &coverage_elect_lst
+
+     Let $current_effdt  = &cov_beg_dt_lst
+     Let $original_effdt = &cov_beg_dt_lst
+     Let $coverage_code  = &cov_cd_lst
+     Let $effdt          = &LL.effdt
+     Let #empl           = &LL.EMPL_RCD
+     Let $benNo          = &LL.BENEFIT_NBR
+     Let $benefit_plan   = &LL.benefit_plan
+     do Get-Coverage
+  !show 'cov beg dt: '
+  !show &cov_beg_dt_lst
+     Let $valid_fetch = 'Y'
+
+
+FROM PS_Health_benefit LL
+WHERE LL.emplid = &P.emplid
+  AND LL.plan_type = '12'
+  AND LL.Effdt =
+     (select max(LL3.effdt) from  ps_health_benefit LL3
+            where LL3.emplid=LL.emplid and LL3.empl_rcd = LL.empl_rcd and LL3.cobra_event_id= LL.cobra_event_id
+            and LL3.plan_type=LL.plan_type and LL3.benefit_nbr = LL.benefit_nbr and LL3.coverage_elect = 'E'
+            and lL3.effdt <= &L.effdt)
+END-SELECT
+
+END-PROCEDURE
+
+!***********************************************************************
+!  PROC Get-Coverage
+!       Get coverage codes and dependent information for person.  Only
+!       need to do this once (i.e. MEDICAL in this case) because the
+!       person will be in DENTAL also and all of the Dependent information
+!       wil always be the same
+!***********************************************************************
+
+BEGIN-PROCEDURE Get-Coverage
+   ! show 'get-coverage'
+   ! show $benefit_plan
+   Let $ecs_contract_id = '716065700'
+   !show 'ben plan: ' $benefit_plan '  ben prog:  ' &benefit_program
+   evaluate $benefit_plan
+     when = 'SELECT'
+     when = 'SLCTPT'
+
+        evaluate &benefit_program 
+        when = 'RET'                      !Retirees
+           Let $ecs_contract_id = '716065704'
+           Let $dcs_contract_id = '015048011'
+           Let $subdivision = '0005'               !hcms1373
+           Let $branch = '0001'               !hcms1373
+                 if &E.state = 'HI'
+                    Let $ecs_contract_id = '716065728'  
+                    Let $dcs_contract_id = '015048015'
+                 end-if
+         break
+         when = 'CCV'                 !Cobra
+                Let $ecs_contract_id = '716065705'
+                Let $dcs_contract_id = '015048071'
+           Let $subdivision = '0006'               !hcms1373
+           Let $branch = '0002'               !hcms1373
+                 if &E.state = 'HI'
+                    Let $ecs_contract_id = '716065729' 
+                    Let $dcs_contract_id = '015048075'
+                 end-if
+         break   
+         when = 'SLY'
+         when = 'HRY'
+         when = 'FL'
+         when = 'FLS'
+         when = 'DIS'
+                 !Let $ecs_contract_id = '01504801'        !active
+                 Let $ecs_contract_id = '716065701'        !active
+                 Let $dcs_contract_id = '015048001'
+           Let $subdivision = '0002'               !hcms1373
+           Let $branch = '0001'               !hcms1373
+                 if &E.state = 'HI'
+                    Let $ecs_contract_id = '716065725'  
+                    Let $dcs_contract_id = '015048005'
+                 end-if
+         break
+         when = 'SUB'
+                 !Let $ecs_contract_id = '01504801'        !active
+                 Let $ecs_contract_id = '716065703'        !active
+                 Let $dcs_contract_id = '015048001'
+           Let $subdivision = '0004'               !hcms1373
+           Let $branch = '0001'               !hcms1373
+                 if &E.state = 'HI'
+                    Let $ecs_contract_id = '716065727'  
+                    Let $dcs_contract_id = '015048005'
+                 end-if 
+        break
+        when = 'STF'
+        when = 'SLF'
+        when = 'STN'
+                 Let $ecs_contract_id = '716065700'        !active
+                 Let $dcs_contract_id = '015048001'
+                 if &E.state = 'HI'
+                    Let $ecs_contract_id = '716065724'  
+                    Let $dcs_contract_id = '015048005'
+                 end-if     
+           Let $subdivision = '0001'               !hcms1373
+           Let $branch = '0001'               !hcms1373           
+       when = 'INT'
+                 Let $ecs_contract_id = '716065702'        !active
+                 Let $dcs_contract_id = '015048001'
+                 if &E.state = 'HI'
+                    Let $ecs_contract_id = '716065727'  
+                    Let $dcs_contract_id = '015048005'
+                 end-if 
+           Let $subdivision = '0003'               !hcms1373
+           Let $branch = '0001'               !hcms1373  
+        end-evaluate
+
+        break
+     when = 'PLUS'
+     when = 'PLUSPT'
+        evaluate &benefit_program
+        when = 'RET'                      !Retirees
+           Let $ecs_contract_id = '716065710'
+           Let $dcs_contract_id = '015048012'
+           Let $subdivision = '0005'               !hcms1373
+           Let $branch = '0001'               !hcms1373
+                 if &E.state = 'HI'
+                    Let $ecs_contract_id = '716065728'  
+                    Let $dcs_contract_id = '015048015'
+                 end-if
+         
+        when = 'CCV'                 !Cobra
+                Let $ecs_contract_id = '716065711'
+                Let $dcs_contract_id = '015048072'
+           Let $subdivision = '0006'               !hcms1373
+           Let $branch = '0002'               !hcms1373
+                 if &E.state = 'HI'
+                    Let $ecs_contract_id = '716065729'  
+                    Let $dcs_contract_id = '015048075'
+                 end-if
+         when = 'SLY'
+         when = 'HRY'
+         when = 'FL'
+         when = 'FLS'
+                 Let $ecs_contract_id = '716065707'        !active
+                 Let $dcs_contract_id = '015048002'
+                 Let $subdivision = '0002'               !hcms1373
+                 Let $branch = '0001'               !hcms1373
+                 if &E.state = 'HI'
+                    Let $ecs_contract_id = '716065725'  
+                    Let $dcs_contract_id = '015048005'
+                 end-if
+        when = 'SUB'
+                 !Let $ecs_contract_id = '01504801'        !active
+                 Let $ecs_contract_id = '716065709'        !active
+                 Let $dcs_contract_id = '015048002'
+                 Let $subdivision = '0004'               !hcms1373
+                 Let $branch = '0001'               !hcms1373
+                 if &E.state = 'HI'
+                    Let $ecs_contract_id = '716065727'  
+                    Let $dcs_contract_id = '015048005'
+                 end-if         
+        when = 'STF'
+        when = 'SLF'
+        when = 'STN'
+                 Let $ecs_contract_id = '716065706'        !active
+                 Let $dcs_contract_id = '015048002'
+                 Let $subdivision = '0001'               !hcms1373
+                 Let $branch = '0001'               !hcms1373
+                 if &E.state = 'HI'
+                    Let $ecs_contract_id = '716065724'  
+                    Let $dcs_contract_id = '015048005'
+                 end-if 
+       when = 'INT'
+                 Let $ecs_contract_id = '716065708'        !active
+                 Let $dcs_contract_id = '015048002'
+                 Let $subdivision = '0003'               !hcms1373
+                 Let $branch = '0001'               !hcms1373
+                 if &E.state = 'HI'
+                    Let $ecs_contract_id = '716065726'  
+                    Let $dcs_contract_id = '015048005'
+                 end-if   
+                 
+         
+        end-evaluate            
+        
+        break
+     when = 'BASE'
+     when = 'BASEPT'
+        evaluate &benefit_program
+        when = 'RET'                      !Retirees
+           Let $ecs_contract_id = '716065716'
+           Let $dcs_contract_id = '015048013'
+                 Let $subdivision = '0005'               !hcms1373
+                 Let $branch = '0001'               !hcms1373
+                 if &E.state = 'HI'
+                    Let $ecs_contract_id = '716065728'  
+                    Let $dcs_contract_id = '015048015'
+                 end-if
+         
+        when = 'CCV'                 !Cobra
+                Let $ecs_contract_id = '716065717'
+                Let $dcs_contract_id = '015048073'
+                 Let $subdivision = '0006'               !hcms1373
+                 Let $branch = '0002'               !hcms1373
+                 if &E.state = 'HI'
+                    Let $ecs_contract_id = '716065713' 
+                    Let $dcs_contract_id = '015048075' 
+                 end-if
+         when = 'SLY'
+         when = 'HRY'
+         when = 'FL'
+         when = 'FLS'
+                 Let $ecs_contract_id = '716065713'        !active
+                 Let $dcs_contract_id = '015048003'
+                 Let $subdivision = '0002'               !hcms1373
+                 Let $branch = '0001'               !hcms1373
+                 if &E.state = 'HI'
+                    Let $ecs_contract_id = '716065701' 
+                    Let $dcs_contract_id = '015048005' 
+                 end-if           
+         when = 'SUB'
+                 !Let $ecs_contract_id = '01504801'        !active
+                 Let $ecs_contract_id = '716065715'        !active
+                 Let $dcs_contract_id = '015048003'
+                 Let $subdivision = '0004'               !hcms1373
+                 Let $branch = '0001'               !hcms1373
+                 if &E.state = 'HI'
+                    Let $ecs_contract_id = '716065727'  
+                    Let $dcs_contract_id = '015048005'
+                 end-if         
+        when = 'STF'
+        when = 'SLF'
+        when = 'STN'
+                 Let $ecs_contract_id = '716065712'        !active
+                 Let $dcs_contract_id = '015048003'
+                 Let $subdivision = '0001'               !hcms1373
+                 Let $branch = '0001'               !hcms1373
+                 if &E.state = 'HI'
+                    Let $ecs_contract_id = '716065724'  
+                    Let $dcs_contract_id = '015048005'
+                 end-if        
+       when = 'INT'
+                 Let $ecs_contract_id = '716065714'        !active
+                 Let $dcs_contract_id = '015048003'
+                 Let $subdivision = '0003'               !hcms1373
+                 Let $branch = '0001'               !hcms1373
+                 if &E.state = 'HI'
+                    Let $ecs_contract_id = '716065726'  
+                    Let $dcs_contract_id = '015048005'
+                 end-if   
+        end-evaluate             
+        
+
+     when = 'MINI'
+     when = 'MINIPT'
+        evaluate &benefit_program
+        when = 'RET'                      !Retirees
+           Let $ecs_contract_id = '716065722'
+           Let $dcs_contract_id = '015048014'
+                 Let $subdivision = '0005'               !hcms1373
+                 Let $branch = '0001'               !hcms1373
+                 if &E.state = 'HI'
+                    Let $ecs_contract_id = '716065725'  
+                    Let $dcs_contract_id = '015048015'
+                 end-if           
+
+         when = 'CCV'                 !Cobra
+                Let $ecs_contract_id = '716065723'
+                Let $dcs_contract_id = '015048074'
+                 Let $subdivision = '0006'               !hcms1373
+                 Let $branch = '0002'               !hcms1373
+                 if &E.state = 'HI'
+                    Let $ecs_contract_id = '716065729'  
+                    Let $dcs_contract_id = '015048075'
+                 end-if                
+         when = 'SLY'
+         when = 'HRY'
+         when = 'FL'
+         when = 'FLS'
+                 Let $ecs_contract_id = '716065719'        !active
+                 Let $dcs_contract_id = '015048004'
+                 Let $subdivision = '0002'               !hcms1373
+                 Let $branch = '0001'               !hcms1373
+                 if &E.state = 'HI'
+                    Let $ecs_contract_id = '716065725' 
+                    Let $dcs_contract_id = '015048005' 
+                 end-if  
+        when = 'SUB'
+                 !Let $ecs_contract_id = '01504801'        !active
+                 Let $ecs_contract_id = '716065721'        !active
+                 Let $dcs_contract_id = '015048004'
+                  Let $subdivision = '0004'               !hcms1373
+                 Let $branch = '0001'               !hcms1373
+                 if &E.state = 'HI'
+                    Let $ecs_contract_id = '716065727'  
+                    Let $dcs_contract_id = '015048005'
+                 end-if         
+        when = 'STF'
+        when = 'SLF'
+        when = 'STN'
+                 Let $ecs_contract_id = '716065718'        !active
+                 Let $dcs_contract_id = '015048004'
+                  Let $subdivision = '0001'               !hcms1373
+                 Let $branch = '0001'               !hcms1373
+                 if &E.state = 'HI'
+                    Let $ecs_contract_id = '716065724'  
+                    Let $dcs_contract_id = '015048005'
+                 end-if 
+       when = 'INT'
+                 Let $ecs_contract_id = '716065720'        !active
+                 Let $dcs_contract_id = '015048004'
+                 Let $subdivision = '0003'               !hcms1373
+                 Let $branch = '0001'               !hcms1373
+                 if &E.state = 'HI'
+                    Let $ecs_contract_id = '716065726'  
+                    Let $dcs_contract_id = '015048005'
+                 end-if          
+        end-evaluate                    
+       
+        break
+   end-evaluate
+   
+   evaluate &company
+     when = 'CCC'
+     when = 'RCE'
+     when = 'GCE'
+	 when = 'CPR'
+          ! CRP 3/1/2016 change if to select correct address
+          !if &E.State = 'X8' or &E.State = 'X7' or &E.Country <> 'USA' or &A.Country <> 'USA'
+          if &E.State = 'X8' or &E.State = 'X7' or &E.Country_other <> 'USA' or &A.Country <> 'USA'
+          #debugb show '&&&&&&&&&&&&&&& Company : ' &company
+           let $address = '100 Lake Hart Dr Benefits 2200'
+           let $address2 = ''
+           let $address3 = ''
+           let $city = 'Orlando'
+           let $state = 'FL'
+           let $POSTAL = '328320100'
+           let $country_cd = 'USA'
+         else
+         !CRP Adding else statement HCMS1407 
+           Do Get-US-Address
+          ! let $address = '**** TEST ****'
+          ! let $address2 = ''
+          ! let $address3 = ''
+          ! let $city = 'TEST'
+          ! let $state = 'TT'
+          ! let $POSTAL = '0TEST0100'
+          ! let $country_cd = 'USA'         
+         end-if
+       !end-if
+       break
+     when = 'KNG'      
+     when = 'IST'
+     when = 'GEN'
+     when = 'CDI'
+     when = 'ACE'
+       break
+   end-evaluate
+  !show 'coveragecd: ' $coverage_code
+  !show ' last name: ' $last_name
+   evaluate $coverage_code
+     when = '1'
+     when = 'W'
+    ! show '************* BEFORE CHECK DEP ********************************************'
+       Let $cov_cd = '00'
+       do Check-Dependents
+      ! break
+     when = '2'
+     when = '3'
+     when = '4'
+    !--M Single with multi depend
+    !--O Single with one depend
+     when = 'M'
+     when = 'O'
+     when = 'Q'
+      !--Check for type of relationship
+      
+       do Check-Dependents
+       if ($spouse = 'Y' and $child = 'Y')
+          Let $cov_cd = '04'
+       else
+          if ($spouse = 'N' and $child = 'Y')
+             Let $cov_cd = '03'
+          else
+             if ($spouse = 'Y' and $child = 'N')
+                Let $cov_cd = '02'
+             else
+                Let $cov_cd = '01'
+             end-if
+          end-if
+       end-if
+     !show ' cov_cd: ' $cov_cd
+       break
+   !---N Single with non-staff spouse
+     when = 'N'
+        Let $cov_cd = '02'
+        do Check-Dependents
+        break
+   !---V Volunteers
+     when = 'V'
+        Let $cov_cd = '00'
+        break
+ 
+     when-other
+        Let $error = 'Y'
+        display 'Invalid Coverage Code for employee ' noline
+        display &L.emplid noline
+        display ' - ' noline
+        display $first_name noline
+        display ' ' noline
+        display $last_name noline
+        display ' cov cd ' noline
+        display $coverage_code
+        Print 'Invalid coverage code for employee: '     (+1,1)
+        Print &L.emplid                                (0,40)
+        break
+   end-evaluate
+END-PROCEDURE Get-Coverage
+
+!***********************************************************************
+!  PROC CHECK-DEPENDENTS
+!       Check the type on the Dependent and saves dependent information
+!***********************************************************************
+
+BEGIN-PROCEDURE Check-Dependents
+  #debugb show '**** check-dependents **** ' $effdt
+   Let $spouse = 'N'
+   Let $child  = 'N'
+   Let #diff   =  0
+   Let $found_dep = 'N'
+BEGIN-SELECT
+D.dependent_benef
+D.Relationship                  &relation
+D.name
+   !show 'First Relation: ' &p.emplid ' - ' &relation ' - '&d.name
+   unstring &D.name by ',' into $last  $Dfirst
+   unstring $Dfirst by  ' ' into $first $middle
+   do fix-name($first, $FName)
+   do fix-name($middle, $MName)
+   !** CRP do fix-name($last, $LName)
+   Let $LName = upper($last)
+   if length($Fname) = 1 and length($MName) > 1
+     let $FName = $MName
+   end-if
+to_char(ADD_MONTHS(LAST_DAY(D.birthdate) + 1, 228), 'MM/DD/YYYY')        &elig_date
+
+D.birthdate
+to_char(D.birthdate,'YYYYMMDD')   &depbday
+to_char(D.birthdate,'YYYYMMDD')     &bdate_julian
+   if isnull(&depbday)
+     print 'No birthdate for dependent' (+1,1)
+     print &P.emplid                    (0,+2,10)
+     print &D.name                      (0,+2,20)
+  
+   end-if
+
+D.sex
+D.national_id
+D.disabled
+D.student
+ !show 'Disable: ' &D.disabled ' - Emplid: ' &p.emplid ' Name - ' &d.name
+ ! New Code 10/20/2015
+  Evaluate &relation
+  When = 'SP'
+    Let $spouse = 'Y'
+    break
+  When = 'C'
+    Let $child = 'Y'
+    break
+  End-Evaluate 
+ 
+ ! End New code 10/20/2015
+   if &relation = 'SP'
+      Let $spouse = 'Y'
+      Let $relation = 'SP'
+   else
+      
+      if (&relation = 'S' or &relation = 'D')
+         Let $child = 'Y'
+         if &D.disabled = 'Y'
+            Let $relation = 'HC'
+         else
+            Let $relation = 'CH'
+         end-if
+ 
+      else
+         Let $relation = 'SC' !--&relation
+      end-if
+      let #dep_age = datediff(&sysdate, &D.birthdate, 'Year')
+
+      if ((#dep_age > 18) and (#dep_age < 26))
+        if &D.disabled = 'Y'
+           Let $dis_ind = 'Y'
+        else
+           Let $dis_ind = 'N'
+        end-if
+          #debug show '***** DISABLED: ' &d.name ' - ' &P.emplid ' - ' #dep_age ' - ' $dis_ind  
+       ! if &D.student = 'Y'
+           Let $stu_ind = &D.student
+         !  #debug show 'D1 Name: ' &d.name ' - ' &P.emplid ' - ' #dep_age ' - ' $stu_ind ' - ' &D.birthdate ' CovJulian - ' &julian_cov_dt ' Bdate Jul: ' &bdate_julian
+       ! else
+       !    Let $stu_ind = 'N'
+       ! end-if
+        
+      else
+         Let $stu_ind = 'N'
+        ! #debug show 'D2 Name: ' &d.name ' - ' &P.emplid ' - ' #dep_age ' - ' $stu_ind ' - ' &D.birthdate
+      end-if
+   end-if
+     Let $dbate_julian = &bdate_julian
+     Let $depbday = &depbday
+  !show 'Name: ' $fname ' - ' $lname ' - ' &d.sex
+   Put $FName $MName $LName $relation $depbday &D.sex &D.national_id #dep_age &D.disabled $stu_ind &elig_date
+      into deps(#num_deps)
+      first middle last relation bday sex ssn age disabled student elig_date
+
+   Let #num_deps = #num_deps + 1
+   Let $found_dep = 'Y'
+   
+
+FROM PS_Health_dependnt HD, PS_DEPENDENT_BENEF D
+WHERE HD.emplid = &P.emplid !$emplid
+  AND HD.EMPL_RCD = #empl        !--&L.EMPL_RCD
+  AND HD.plan_type = '12'       !--NEED TO MATCH ON CORRECT RECORD
+  AND HD.BENEFIT_NBR = $benNo        !--&L.BENEFIT_NBR
+  AND HD.effdt = $effdt           !--used to be &L.effdt (4/26/95)
+  AND HD.emplid = D.emplid
+  AND HD.dependent_benef = D.dependent_benef
+END-SELECT
+
+!show '************* NUM DEP **********************************  ' #num_deps
+if #num_deps <= 0
+  #debugb show 'check-dependents ' $effdt
+   Let $spouse = 'N'
+   Let $child  = 'N'
+   Let #diff   =  0
+   Let $cov_cancel_cd_dep = ' '
+   Let $cov_cancel_dt_dep = ' '
+
+BEGIN-SELECT
+D2.dependent_benef
+D2.Relationship                  &relation2
+D2.name
+
+   unstring &D2.name by ',' into $last  $Dfirst
+   unstring $Dfirst by  ' ' into $first $middle
+   do fix-name($first, $FName)
+   do fix-name($middle, $MName)
+   do fix-name($last, $LName)
+   if length($Fname) = 1 and length($MName) > 1
+     let $FName = $MName
+   end-if
+to_char(ADD_MONTHS(LAST_DAY(D2.birthdate) + 1, 228), 'MM/DD/YYYY')        &elig_date2
+to_char(ADD_MONTHS(LAST_DAY(D2.birthdate) + 1, 228), 'YYYYMMDD')        &bdate_julian2
+   !show 'Elig Date: ' &elig_date
+D2.birthdate
+to_char(D2.birthdate,'MM/DD/YYYY')   &depbday2
+   if isnull(&depbday2)
+     print 'No birthdate for dependent' (+1,1)
+     print &P.emplid                    (0,+2,10)
+     print &D2.name                      (0,+2,20)
+  
+   end-if
+
+D2.sex
+D2.national_id
+D2.disabled
+D2.student
+ ! show 'Relationship: ' $relation
+ ! show 'Relationship2: ' $relation2
+   if &relation2 = 'SP'
+      Let $spouse = 'Y'
+      Let $relation = 'SP'
+   else
+      
+      if (&relation2 = 'S' or &relation2 = 'D')
+         Let $child = 'Y'
+         if &D.disabled = 'Y'
+            Let $relation = 'HC'
+         else
+            Let $relation = 'CH'
+         end-if
+ 
+      else
+         Let $relation = 'SC' !--&relation
+      end-if
+      let #dep_age = datediff(&sysdate, &D2.birthdate, 'Year')
+     ! #debug  show 'BEFORE SECOND DIS IND*********: ' #dep_age
+      if ((#dep_age > 18) and (#dep_age < 26))
+ #debug  show 'IN SECOND DIS IND*********: ' $dis_ind
+           Let $dis_ind = 'N'
+
+      !  if &D2.student = 'Y'
+           Let $stu_ind = 'Y'
+      !   #debug  show 'D2b Name: ' &d.name ' - ' &P.emplid ' - ' #dep_age ' - ' $stu_ind
+      !  else
+      !     Let $stu_ind = 'N'
+      !  end-if
+      else    
+         Let $stu_ind = 'N'
+        ! #debug show 'D2b Name: ' &d.name ' - ' &P.emplid ' - ' #dep_age ' - ' $stu_ind
+      end-if
+   end-if
+
+     Let $depbday = &depbday
+ !show 'Name: ' $FName ' - ' $MName ' - ' $LName
+   Put $FName $MName $LName $relation $depbday &D2.sex &D2.national_id #dep_age &D2.disabled $stu_ind &elig_date2
+      into deps(#num_deps)
+      first middle last relation bday sex ssn age disabled student elig_date
+  Let $cov_cancel_cd_dep = '01'
+  Let $cov_cancel_dt_dep = $current_effdt
+   Let #num_deps = #num_deps + 1
+ ! show '------------------------ IN THE LAST SELECT EFFDT----------  ' $effdt
+FROM PS_Health_dependnt HD, PS_DEPENDENT_BENEF D2
+WHERE HD.emplid = &P.emplid !$emplid
+  AND HD.EMPL_RCD = #empl        !--&L.EMPL_RCD
+  AND HD.plan_type = '12'     
+  AND HD.BENEFIT_NBR = $benNo  
+  AND HD.effdt = (select MAX(effdt) from PS_Health_dependnt HDD
+  	  		     where hdd.emplid = hd.emplid
+				 and hdd.plan_type = hd.PLAN_TYPE
+  				 and (hdd.effdt < $effdt
+				 and hdd.EFFDT >= '01-JAN-2008'))        
+  AND HD.emplid = D2.emplid
+  AND HD.dependent_benef = D2.dependent_benef  
+  
+END-SELECT
+
+end-if
+END-PROCEDURE Check-Dependents
+
+
+!***********************************************************************
+!  PROC WRITE-GEN-INFO
+!       Write out the general information for the person with blank filler
+!       at the end to carry it out to position 356
+!********************************************************************************************* 
+BEGIN-PROCEDURE Write-2000
+!****************************************************************************
+!****************************************************************************
+!show '**** 1**' &benefit_program ' ....... ' $eessn ' *** ' &company '**** ' &paygroup
+!show '*** IN INTL CODE: ' $benefit_plan
+Add 1 to #total_count
+evaluate &company
+when = 'KNG'
+     Let $report_id = 'kngs'
+     break
+when = 'ACE'
+     Let $report_id = 'acev'
+     break
+when = 'GEN'
+     Let $report_id = 'genc'
+     break
+when = 'CCC'
+when = 'CPR'
+when = 'GCE'
+   !show 'PAYGROUP: ' &paygroup ' - ' $eessn
+    !  show '*** IN INTL CODE: ' $benefit_plan
+     Evaluate &paygroup
+     when = 'HFT'
+          Let $report_id = 'pdst'
+          break
+     when = 'INT'
+          Let $report_id = 'intl'
+          !*********************************************************************
+          ! duplicate code from up top for intl
+                 Let $subdivision = '0003'               !hcms1373
+                 Let $branch = '0001'               !hcms1373
+       evaluate $benefit_plan
+         when = 'SELECT'
+         when = 'SLCTPT'
+
+                 Let $ecs_contract_id = '716065702'        !active
+                 Let $dcs_contract_id = '015048001'
+                 if &E.state = 'HI'
+                    Let $ecs_contract_id = '716065727'  
+                    Let $dcs_contract_id = '015048005'
+                 end-if   
+
+        break
+     when = 'PLUS'
+     when = 'PLUSPT'
+                 Let $ecs_contract_id = '716065708'        !active
+                 Let $dcs_contract_id = '015048002'
+                 if &E.state = 'HI'
+                    Let $ecs_contract_id = '716065726'  
+                    Let $dcs_contract_id = '015048005'
+                 end-if   
+                 
+        
+        break
+     when = 'BASE'
+     when = 'BASEPT'
+ 
+       
+       when = 'INT'
+                 Let $ecs_contract_id = '716065714'        !active
+                 Let $dcs_contract_id = '015048003'
+                 if &E.state = 'HI'
+                    Let $ecs_contract_id = '716065726'  
+                    Let $dcs_contract_id = '015048005'
+                 end-if              
+        
+
+     when = 'MINI'
+     when = 'MINIPT'
+                 Let $ecs_contract_id = '716065720'        !active
+                 Let $dcs_contract_id = '015048004'
+                 if &E.state = 'HI'
+                    Let $ecs_contract_id = '716065726'  
+                    Let $dcs_contract_id = '015048005'
+                 end-if          
+        break
+      end-evaluate
+  end-evaluate        
+          !*********************************************************************
+End-Evaluate    
+
+!****************************************************************************
+Add 1 to #total_count
+! show 'Write-INS'
+!---- Write File
+  let #_counter = #_counter + 1
+  let $counter = TO_CHAR(#_counter)
+ 
+   evaluate $cov_cd
+   
+   when = '00'
+       let $med_cat_cov = 'EMP'
+       let $med_cat_cov = 'EMP'
+       let $mcc = '1'          !HCMS1373 crp
+        break
+   when = '01'
+      let $med_cat_cov = 'EMP'
+       let $med_cat_cov = 'EMP'
+       let $mcc = '1'          !HCMS1373 crp 
+      
+        break   
+   when = '02'
+       let $med_cat_cov = 'ESP'
+       let $med_cat_cov = 'ESP'
+       let $mcc = '3'          !HCMS1373 crp
+        break  
+   when = '03'
+       let $med_cat_cov = 'ECH'
+       let $med_cat_cov = 'ECH'
+       let $mcc = '2'          !HCMS1373 crp
+        break  
+   when = '04'
+       let $med_cat_cov = 'FAM'
+       let $med_cat_cov = 'FAM'
+       let $mcc = '4'          !HCMS1373 crp
+        break
+   end-evaluate
+   
+   !** Employee
+   ADD 1 to #100_count
+   concat '0' with $eessn
+   Let $ssn_e = substr($eessn,1,9)
+ !***************************************************************************************************************************
+ add 1 to #segment_count   
+  write 1 from
+     'INS'
+     '*' 
+	 'Y'      !INS01
+	 '*'
+	 '18'     !INS02
+	 '*'
+	 '030'    !INS03
+	 '*'
+	 ' '      !INS04
+	 '*'
+	 'A'      !INS05
+     '*'
+     'E'      !INS06-1
+     '*'      !INS06-2
+     '*'      !INS07      
+     'FT'         !INS08
+	 '~'
+add 1 to #segment_count   	 
+  write 1 from
+     'REF'
+	 '*'
+	 '0F'
+	 '*'
+	 $ssn_e
+	 '~'
+ add 1 to #segment_count       
+ write 1 from
+     'REF'
+	 '*'
+	 '1L'
+	 '*'
+	 $ecs_contract_id     !'7160657 '
+	 '~' 
+	 
+add 1 to #segment_count   
+if isnull(&hire_dt)
+  show ' *** HIRE DATE: ' &hire_dt
+  let $hiredate = '20160101'
+else
+  let $hiredate = &hire_dt
+end-if
+ write 1 from
+       'DTP'
+       '*'
+       '336'
+       '*'
+       'D8'
+       '*'
+       !&hire_dt
+       $hiredate
+	   '~'
+ add 1 to #segment_count  
+
+write 1 from
+      'NM1'
+      '*'
+      'IL'
+      '*'
+      '1'
+      '*'
+      $last_name
+      '*'
+      $first_name
+      '*'
+      $middle_name:1   
+      '*'
+      '*'
+      '*'
+      '34'  
+      '*'
+      $ssn_e 
+      '~'
+      
+      
+ add 1 to #segment_count        
+write 1 from
+      'PER'
+      '*'
+      'IP'
+      '*'
+      '*'
+      'TE'
+      '*'
+      $Phone
+      '~'
+add 1 to #segment_count         
+write 1 from
+      'N3'
+      '*'
+      $address
+      '*'
+      $address2
+      '~'
+add 1 to #segment_count   
+write 1 from
+      'N4'
+      '*'
+      $city
+      '*'
+      $state
+      '*'
+      $POSTAL
+      '*'
+      $country_cd:3      !country code 
+   	  '~'          
+add 1 to #segment_count  
+!show '*********** birthdate: ' &birthdate
+write 1 from
+      'DMG'
+      '*'
+      'D8'
+      '*'
+      &birthdate
+      '*'
+      &P.sex:1
+      '*'
+      &P.mar_status
+   	  '~'
+add 1 to #segment_count   
+write 1 from
+      'HD'
+      '*'
+      '030'
+      '*'
+      '*'
+      'HLT'
+      '*'
+      'TA' 
+      '*' !coverage tier
+      $med_cat_cov
+      '~'
+add 1 to #segment_count         
+write 1 from
+      'DTP'
+      '*'
+      '348'
+      '*'
+      'D8'
+      '*'
+      &julian_cov_dt
+      '~'
+
+if &coverage_elect = 'T'    
+add 1 to #segment_count     
+write 1 from
+      'DTP'
+      '*'
+      '349'
+      '*'
+      'D8'
+      '*'
+      &julian_cov_dt
+      !$cancel_date
+      '~'
+end-if
+!******************************************************************************
+!***** UCCI FILE ***********
+ !***************************************************************************************************************************
+add 1 to #segment_count_ucci
+     
+if isnull(&hire_dt)
+  !show ' *** HIRE DATE: ' &hire_dt
+  let $hiredate = '20160101'
+else
+  let $hiredate = &hire_dt
+end-if
+add 1 to #segment_count_ucci
+ let #blank_middle_name = isblank($blank_middle_name)
+ if #blank_middle_name = 1
+    let $middle_name = ''
+ end-if
+!************ CRP flat file ***********************************
+evaluate &benefit_program
+when = 'RET'
+     let $ml_status_code = 'R'
+     let $cobra_ind = '  '
+     break
+when = 'CCV'
+     let $cobra_ind = 'CE'
+     let $ml_status_code = 'A'
+     break
+when-other
+     let $ml_status_code = 'A'
+     let $cobra_ind = '  '
+     break
+end-evaluate
+if $ssn_e = ' '
+  display '************* NO SSN ***********'
+end-if     
+if &coverage_elect = 'T'
+   !dont send for just the first new run of the year
+   let $cov_end_dt = &metlife_cov_dt
+   Let $metlife_cov_dt = '01012017'
+   display '=============='
+   display 'Dont send for: '
+   display $ssn_e
+   display $last_name
+   display $first_name
+   display &julian_cov_dt
+   display '=============='
+else
+ if &coverage_elect = 'W'
+   let $cov_end_dt = &metlife_cov_dt
+ end-if
+   let $metlife_cov_dt = &metlife_cov_dt
+   !if $metlife_cov_dt > '01012017'
+   if &julian_cov_dt > '20170101'
+      let $metlife_cov_dt = &metlife_cov_dt
+   else
+      Let $metlife_cov_dt = '01012017'
+   end-if
+end-if
+
+
+write 2 from
+      'E'
+      '0314737'
+      '00'
+      $ssn_e
+      ' ':11
+      $ssn_e
+      $last_name:20
+      $first_name:12
+      $middle_name:1
+      &birthdate:8
+      &P.mar_status:1
+      &P.sex:1
+      '00'                  !relationaship code, 00=emp
+      $hiredate:8
+      ' ':11
+      ' ':24
+       'S'                   !survivor info
+      ' ':9
+      ' ':20
+      ' ':12
+      'D '                   !Address Info
+       $address:32
+       $address2:32
+       $city:21
+       $state:2
+       $postal:9   
+       'D'                  !coverage info
+       $metlife_cov_dt:8  !************** cov start date ************
+       $cov_end_dt:8
+      ! &julian_cov_dt:8                !cov end date
+       '0314737'            !group nbr
+       $subdivision               !subdivision
+       $branch               !branch
+       ' ':2                !plan code, spaces
+       $ml_status_code                  !status code  
+       $mcc                  !members covered code
+       $cobra_ind:2                !cobra
+       ! &julian_cov_dt:8
+!end-if    
+     
+   let $cov_end_dt = ' '   
+      
+      
+!**************************************************************
+
+!* UCCI FILE END **************************************************************
+      
+! $eessn:10                                 !SSN
+!     $ecs_contract_id:30                                    !ECS Group nbr
+!     '100':3                                   ! Rec Identifier
+!     ' ':7                                     !CID Seq nbr
+!     ' ':1                                     !space
+!     $ssn_e:17                                 !SSN  
+!     &birthdate:10                             !birthdate
+!     $first_name:25
+!     $middle_name:25
+!     $last_name:35 
+!     $e_prefix:10
+!     $e_suffix:10    
+!     &P.sex:1  
+!     ' ':6                                     !empl_status
+!     ' ':1                                     !$mar_status:1   
+!     '20':2                                    !relationship_cd
+!     ' ':35                                    !spaces
+!     'Y':1                                     !Subsciber indicator
+!     $hire_dt:10                               !hire date 
+!     ' ':261                                   !spaces
+
+END-PROCEDURE Write-100
+
+BEGIN-PROCEDURE Write-100-Dep
+!show 'IN WRITE 100 DEP'
+! show 'write-dependents'
+   Let #index = 0
+       Let $depsLINE = substr($line,1,35) || '001' || '      ' || '   ' || substr($line,53,35)|| '001'
+   while (#index < #num_deps)
+      Add 1 to #total_count
+      Get $first $middle_name $last $relation $bday $sex $ssn #age $disabled $student $elig_date
+         from deps(#index)
+         first middle last relation bday sex ssn age disabled student elig_date
+     if $relation = 'SP'
+        Let $rel_code = '01'
+        let $metlife_rel_code = '01'     !hcms1373
+     else 
+        Let $rel_code = '19'
+        let $metlife_rel_code = '02'     !hcms1373
+     end-if
+ 
+   if $ssn = '0'
+      Let $ssn = edit($ssn,'B999999999')
+   end-if
+  !show 'relation in write: ' $rel_code
+  add 1 to #segment_count   
+  write 1 from
+     'INS'
+     '*' 
+	 'N'
+	 '*'
+	 $rel_code
+	 '*'
+	 '030'
+     '*'
+	 ' '      !INS04
+	 '*'
+	 'A'      !INS05
+     '*'
+     'E'      !INS06-1
+     '*'      !INS06-2
+     '*'      !INS07      
+     'FT'        !INS08
+     '*'          !INS09
+     '*'
+     &D.disabled  !INS10
+	 '~'	
+
+
+	
+    
+    
+  add 1 to #segment_count      
+  write 1 from
+     'REF'
+	 '*'
+	 '0F'
+	 '*'
+     $ssn_e
+	 '~'
+ 
+ add 1 to #segment_count   
+ write 1 from
+     'REF'
+	 '*'
+	 '1L'
+	 '*'
+	 $ecs_contract_id     !'7160657 '
+ 	 '~' 
+     
+add 1 to #segment_count        
+                                     !dependents
+
+write 1 from
+       'DTP'
+       '*'
+       '336'
+       '*'
+       'D8'
+       '*'
+       &hire_dt
+	   '~'
+
+add 1 to #segment_count     
+ let #blank_ssn = isblank($ssn)  
+! show '********** SSN DEP - ' $ssn
+ if #blank_ssn = 1 
+    let $ssn = '999999999'
+ end-if
+write 1 from
+      'NM1'
+      '*'
+      'IL'
+      '*'
+      '1'
+      '*'
+      $last
+      '*'
+      $first
+      '*'
+      $middle_name   
+      '*'
+      '*'
+      $e_suffix   !Suffix
+      '*'
+      '34'  
+      '*'
+      $ssn 
+      '*'
+      '~'
+ 
+ add 1 to #segment_count        
+write 1 from
+      'PER'
+      '*'
+      'IP'
+      '*'
+      '*'
+      'TE'
+      '*'
+      $Phone
+      '~'
+add 1 to #segment_count         
+write 1 from
+      'N3'
+      '*'
+      $address
+      '*'
+      $address2
+      '~'
+
+ add 1 to #segment_count   
+write 1 from
+      'N4'
+      '*'
+      $city
+      '*'
+      $state
+      '*'
+      $POSTAL
+      '*'
+      $country_cd:3      !country code 
+   	  '~'      
+      
+ add 1 to #segment_count       
+                         !dependents
+ !show 'Name: ' $last ' ' $first
+ ! show '*********** birthday line 1579: ' $bday
+write 1 from
+      'DMG'
+      '*'
+      'D8'
+      '*'
+      $bday         !dependent birthdate
+      '*'
+      $sex:1
+      '*'
+      &P.mar_status
+      '*'
+   	  '~'
+add 1 to #segment_count   
+write 1 from
+      'HD'
+      '*'
+      '030'
+      '*'
+      '*'
+      'HLT'
+      '*'
+      'TA'
+      '*'   
+      $med_cat_cov
+      '~'
+ add 1 to #segment_count        
+write 1 from
+      'DTP'
+      '*'
+      '348'
+      '*'
+      'D8'
+      '*'
+      &julian_cov_dt
+     ! '*'
+     ! '349'
+     ! '*'
+      !'D8'
+     ! '*'
+     ! $cancel_date
+      '~'
+
+if &coverage_elect = 'T'    
+add 1 to #segment_count     
+write 1 from
+      'DTP'
+      '*'
+      '349'
+      '*'
+      'D8'
+      '*'
+      &julian_cov_dt
+      !$cancel_date
+      '~'
+end-if  
+!****************************************************************************
+!************ UCCI FILE DEP LAYOUT ***********************
+!show 'Disable2: ' &D.disabled ' - Emplid2: ' &p.emplid ' Name2 - ' &d.name ' - disabled: ' $disabled
+add 1 to #segment_count_ucci
+ ! write 2 from
+ !    'INS'
+ !    '*' 
+	! 'N'      !INS01
+	! '*'
+	! $rel_code      !ins02
+	! '*'
+	! '030'          !ins03
+!     '*'          !INS04
+	! '*'
+	! 'A'      !INS05
+ !    '*'
+ !    '*'      !INS06-2
+ !    '*'      !INS07      
+ !    'FT'        !INS08
+ !    '*'          !INS09
+ !    '*'
+ !    !&D.disabled  !INS10
+ !    $disabled     !INS10
+	! '~'	
+  add 1 to #segment_count_ucci
+!  write 2 from
+!     'REF'
+!	 '*'
+!	 '0F'
+!	 '*'
+ !    $ssn_e
+	! '~'
+ !add 1 to #segment_count_ucci
+! write 2 from
+ !    'REF'
+!	 '*'
+!	 '1L'
+	! '*'
+	! $dcs_contract_id     !'015048001 '
+ !	 '~' 
+ add 1 to #segment_count_ucci    
+if isnull(&hire_dt)
+  show ' *** HIRE DATE: ' &hire_dt
+  let $hiredate = '20160101'
+else
+  let $hiredate = &hire_dt
+end-if
+!write 2 from
+!       'DTP'
+!       '*'
+!       '336'
+!       '*'
+ !      'D8'
+!       '*'
+ !      !&hire_dt
+!       $hiredate
+!	   '~'
+       
+  add 1 to #segment_count_ucci
+ let #blank_ssn = isblank($ssn)  
+ !show '********** SSN DEP - ' $ssn
+ if #blank_ssn = 1 
+    let $ssn = '999999999'
+ end-if
+ let #blank_middle_name = isblank($blank_middle_name)
+ if #blank_middle_name = 1
+    let $middle_name = ''
+ end-if
+!write 2 from
+ !     'NM1'
+ !     '*'
+ !     'IL'
+ !     '*'
+!      '1'
+ !     '*'
+ !     $last
+ !     '*'
+ !     $first
+!      '*'
+  !    $middle_name   
+ !     '*'
+ !     '*'
+ !     $e_suffix   !Suffix
+ !     '*'
+ !     '34'  
+ !     '*'
+ !     $ssn 
+ !     '~'
+!if isblank($address2)
+ !add 1 to #segment_count_ucci
+!write 2 from
+ !     'N3'
+ !     '*'
+ !     $address
+!      '~'
+!else
+! add 1 to #segment_count_ucci
+!write 2 from
+!      'N3'
+ !     '*'
+ !     $address
+!      '*'
+ !     $address2
+!      '~'
+!end-if
+add 1 to #segment_count_ucci
+!write 2 from
+ !     'N4'
+ !     '*'
+ !     $city
+ !     '*'
+!      $state
+ !     '*'
+ !     $POSTAL
+ !     '*'
+!      $country_cd:3      !country code 
+!   	  '~'          
+add 1 to #segment_count_ucci
+!write 2 from
+!      'DMG'
+ !     '*'
+!      'D8'
+ !     '*'
+ !     $bday
+ !     '*'
+!      $sex:1
+!      '*'
+!      &P.mar_status
+!   	  '~'
+add 1 to #segment_count_ucci
+!write 2 from
+!      'HD'
+!      '*'
+!      '030'
+ !     '*'
+!      '*'
+!      'HLT'
+ !     '*'
+!      'TA'
+!      '*'   
+ !     $med_cat_cov
+ !     '~'
+ add 1 to #segment_count_ucci
+!write 2 from
+ !     'DTP'
+!      '*'
+!      '348'
+ !     '*'
+ !     'D8'
+!      '*'
+!      &julian_cov_dt
+!      '~'
+
+if &coverage_elect = 'T'      
+add 1 to #segment_count_ucci
+!write 2 from
+!      'DTP'
+!      '*'
+!      '349'
+!      '*'
+!      'D8'
+!      '*'
+ !     &julian_cov_dt
+!      !$cancel_date
+!      '~'
+end-if   
+!metlfife dependents
+!************ CRP flat file ***********************************
+evaluate &benefit_program
+when = 'RET'
+     let $ml_status_code = 'R'
+     let $cobra_ind = '  '
+     break
+when = 'CCV'
+     let $cobra_ind = 'CE'
+     let $ml_status_code = 'A'
+     break
+when-other
+     let $ml_status_code = 'A'
+     let $cobra_ind = '  '
+     break
+end-evaluate
+if $ssn_e = ' '
+  display '************* NO SSN DEP***********'
+end-if  
+if &coverage_elect = 'T'
+   !dont send for just the first new run of the year
+   let $cov_end_dt = &metlife_cov_dt
+   Let $metlife_cov_dt = '01012017'
+   display '=============='
+   display 'Dont send for: '
+   display $ssn_e
+   display $last_name
+   display $first_name
+   display &julian_cov_dt
+   display '=============='
+else
+   let $metlife_cov_dt = &metlife_cov_dt
+   !if $metlife_cov_dt > '01012017'
+   if &julian_cov_dt > '20170101'
+      let $metlife_cov_dt = &metlife_cov_dt
+   else
+      Let $metlife_cov_dt = '01012017'
+   end-if
+end-if
+
+write 2 from
+      'D'
+      '0314737'
+      '00'
+      $ssn_e
+      ' ':11
+      $ssn
+      $last:20
+      $first:12
+      $middle_name:1
+      $bday:8
+      &P.mar_status:1
+      !&P.sex:1           !sex
+      $sex:1   
+      $metlife_rel_code:2                  !relationship code
+      $hiredate:8
+      ' ':11
+      ' ':24
+      'S'                   !survivor info
+      ' ':9
+      ' ':20
+      ' ':12
+      'D '                   !Address Info
+       $address:32
+       $address2:32
+       $city:21
+       $state:2
+       $postal:9   
+       'D'                  !coverage info
+       $metlife_cov_dt:8           !cov start date
+       $cov_end_dt:8                !cov end date
+       '0314737'            !group nbr
+       $subdivision               !subdivision
+       $branch               !branch
+       ' ':2                !plan code, spaces
+       $ml_status_code                  !status code  
+       $mcc                  !members covered code
+       $cobra_ind:2                !cobra
+      
+!**************************************************************
+
+!************ UCCI FILE DEP LAYOUT END ************************************** 
+      
+
+   
+!  write 1 from
+!     $eessn:10                                 !SSN
+!     $ecs_contract_id:30       !ECS Group nbr
+!     '100':3                                   ! Rec Identifier
+!     ' ':7                               !CID Seq nbr
+!     ' ':1                                     !space
+!     $ssn:17                                 !SSN  
+!     $bday:10                             !birthdate
+!     $first:25
+!     $middle_name:25
+!     $last:35 
+!     $e_prefix:10
+!     $e_suffix:10    
+!     $sex:1  
+!    ' ':6                                     !empl_status
+!     ' ':1   
+!     $rel_code:2                        !relationship_cd
+!     ' ':35                                    !spaces
+!     'N':1                                     !Subsciber indicator
+!     ' ':10                               !hire date 
+!     ' ':261                                   !spaces
+      
+      if $rel_code = '02'
+      
+           if $student = 'Y'         
+                  Let $elig_qual_code = 'F'
+                  If #age <> 26 
+                   !  do Write-115  
+                  end-if 
+           else
+              if $disabled = 'Y'
+                  Let $elig_qual_code = '3'
+                 ! do Write-115   
+               end-if  
+                   
+           end-if
+#debugb show '***** Age: ' #age ' - ' $student ' - ' $disabled ' - ' $elig_qual_code
+      end-if
+
+      ! do Write-dependents
+       Let #index = #index + 1 
+   end-while
+END-PROCEDURE Write-100-Dep
+
+!***********************************************************************
+!  PROC WRITE-BENEFITS
+!       Write out the Benefits information for the person
+!***********************************************************************
+! REMOVE PROCEDURE CRP
+!BEGIN-PROCEDURE Write-Benefits
+!  show 'write-benefits'
+!END-PROCEDURE Write-Benefits
+
+!***********************************************************************
+!  PROC WRITE-DEPENDENTS
+!       Write out the Dependent information for an employee.  Gets the
+!       coverage information from the benefits info for the employee with
+!       blank filler at the end to carry it out to position 356
+!***********************************************************************
+
+BEGIN-PROCEDURE Write-Dependents
+ ! show 'write-dependents'
+     
+ Add 1 to #total_count
+ !*** Medical 
+      write 1 from   
+      $eessn:10          !subscriber SSN
+      $ecs_contract_id:30             !ECS 
+      '135':3            !rec id  
+      ' ':7              !seq nbr
+      '01':2               !coverage count
+      'PPO':3               !insurance code
+      $current_effdt:10    !coverage effdt
+      ' ':3               ! spaces ECS
+      $med_cat_cov:3      !coverage category code
+      ' ':3               !spaces
+      '363':17
+      ' ':2               !spaces
+      $cov_cancel_dt_dep:10   !cancel date
+      $cov_cancel_cd_dep:2    !cancel code
+      &current_date:10    !report date
+      ' ':10              !sapces
+      $prev_agr_nbr:17    !
+      ' ':358             
+
+!*** Prescription
+Add 1 to #total_count
+      write 1 from
+      $eessn:10          !subscriber SSN
+      $ecs_contract_id:30             !ECS 
+      '135':3            !rec id  
+      ' ':7              !seq nbr
+      '01':2               !coverage count
+      'PDG':3               !insurance code
+      $current_effdt:10    !coverage effdt
+      ' ':3               ! spaces ECS
+      $med_cat_cov:3      !coverage category code
+      ' ':3               !spaces
+      '363':17
+      ' ':2               !spaces
+      $cov_cancel_dt_dep:10   !cancel date
+      $cov_cancel_cd_dep:2    !cancel code
+      &current_date:10    !report date
+      ' ':10              !sapces
+      $prev_agr_nbr:17    !
+      ' ':358           
+
+!*** Dental
+Add 1 to #total_count
+      write 1 from
+      $eessn:10          !subscriber SSN
+      $dcs_contract_id:30             !ECS 
+      '135':3            !rec id  
+      ' ':7              !seq nbr
+      '01':2               !coverage count
+      'DEN':3               !insurance code
+      $current_effdt:10    !coverage effdt
+      ' ':3               ! spaces ECS
+      $med_cat_cov:3      !coverage category code
+      ' ':3               !spaces
+      '363':17
+      ' ':2               !spaces
+      $cov_cancel_dt_dep:10   !cancel date
+      $cov_cancel_cd_dep:2    !cancel code
+      &current_date:10    !report date
+      ' ':10              !sapces
+      $prev_agr_nbr:17    !
+      ' ':358           
+
+      
+ !     Let $cancel_date = ' '
+ !     Let $cov_cancel_cd = ' '
+  
+ !    Let #index = #index + 1
+ !  end-while
+END-PROCEDURE Write-Dependents
+
+BEGIN-PROCEDURE Write-115
+if (&julian_cov_dt > &bdate_julian or &julian_cov_dt > &bdate_julian2)
+ #debug show 'Printed Date: ' &cov_beg_dt
+ Let $elig_date = &cov_beg_dt
+else
+ #debug show 'Other Date, use reg elig date: ' $elig_date
+  
+end-if
+Add 1 to #total_count
+      write 1 from
+      $eessn:10          !subscriber SSN
+      $ecs_contract_id:30             !ECS 
+      '115':3            !rec id  
+      ' ':7              !seq nbr, spaces
+      '01':2             !extended elig count
+      $elig_qual_code:1
+      ' ':10           !cert date
+      ' ':35           !institution name
+      $elig_date:10   !deletion date
+      ' ':10           !spaces
+      ' ':2            !spaces
+      ' ':15           !spaces
+      ' ':10           !spaces
+      ' ':355          !spaces
+END-PROCEDURE Write-115
+
+BEGIN-PROCEDURE write-header
+!show 'company: ' 
+!show &company
+begin-select
+a.FEDERAL_EIN
+
+FROM PS_W2_COMPANY A
+WHERE a.company = &company
+AND a.calendar_year = (select MAX(calendar_year)
+                       from PS_W2_COMPANY
+                       where company = &company
+                       and taxform_id = 'W')
+AND a.taxform_id = 'W'
+end-select
+
+Add 1 to #total_count
+write 1 from
+      'ISA'
+      '*'
+      '00'
+      '*'
+      ' '
+      '*'
+      '00'
+      '*'
+      ' '
+      '*'
+      '30'
+      '*'
+      &a.FEDERAL_EIN
+      '30'
+      '*'
+      '570287419'
+      '*'
+      &header_date:6
+      '*'
+      &header_time:4
+      '*'
+      'U.S. EDI ASC X12'
+      '*'
+      '00501'
+      '*'
+      '1'
+      '*'
+      '0'
+      '*'
+      'P'       !File type P - Production, T - TEST
+      '*'
+      ':'
+      
+ write 1 from
+      'GS'
+      '*'
+      'BE'
+      '*'
+      &a.FEDERAL_EIN
+      '*'
+      '570287419'
+      '*'
+      &header_date_be:8
+      '*'
+      &header_time_be:8
+      '*'
+      '1'
+      '*'
+      'X'
+      '*'
+      '005010X220A1'
+add 1 to #segment_count      
+write 1 from
+      'ST'
+      '*'
+      '834'
+      '*'
+      '1'
+      '*'
+      '005010X220A1'
+add 1 to #segment_count         
+write 1 from
+      'BGN'
+      '*'
+      '1'
+      '*'
+      &header_date_be:8
+      '*'
+      &header_time_be:8
+      '*'
+      'ET'
+      '*'
+      '*'
+      '*'
+      '4'
+      '*'
+      '*'
+add 1 to #segment_count   
+write 1 from
+      'DTP'
+      '*'
+      '007'
+      '*'
+      'D8'
+      '*'
+      &header_date_be:8
+add 1 to #segment_count   
+write 1 from
+      'N1'
+      '*'
+      'P5'
+      '*'
+      'Cru'
+      '*'
+      'FI'
+      '*'
+      &a.FEDERAL_EIN
+      '*'
+      '*'
+      '*'
+add 1 to #segment_count         
+write 1 from
+      'N1'
+      '*'
+      'IN'
+      '*'
+      'FI'
+      '*'
+      '570287419'
+      '*'
+      ' '
+      '*'
+      ' '
+     
+       
+END-PROCEDURE
+
+BEGIN-PROCEDURE Write-110
+#debugb show 'Address: ' $eessn ' - ' $address ' - ' $address2 ' - ' $city ' - ' $country_cd ' - ' &e.country
+Add 1 to #total_count
+!show $country_cd
+!Let $country_cd = &E.country
+
+!IF $address = '100 Lake Hart Dr Benefits 2200'
+!  add 1 to #cc
+!  show #cc
+!end-if
+write 1 from
+      $eessn:10          !subscriber SSN
+      $ecs_contract_id:30             !ECS 
+      '110':3            !Record Identifyer  
+      ' ':7              ! Seq nbr CID
+      'C9':2             !Address Qualifier = subscriber/employee
+      $address:55 
+      $address2:55 
+      $address3:55
+      $address4:55
+      $city:30 
+      $state:2 
+      $POSTAL:15
+      $country_cd:3      !country code
+      &address_effdt:10
+      ' ':10           !cancel dt
+      ' ':158            !filler
+          
+END-PROCEDURE
+
+BEGIN-PROCEDURE Write-130
+!show '**** 1**' &benefit_program ' ....... ' $eessn ' *** ' &company '**** ' &paygroup
+!show '*** IN INTL CODE: ' $benefit_plan
+Add 1 to #total_count
+evaluate &company
+when = 'KNG'
+     Let $report_id = 'kngs'
+     break
+when = 'ACE'
+     Let $report_id = 'acev'
+     break
+when = 'GEN'
+     Let $report_id = 'genc'
+     break
+when = 'CCC'
+  ! show 'PAYGROUP: ' &paygroup ' - ' $eessn
+   !   show '*** IN INTL CODE: ' $benefit_plan
+     Evaluate &paygroup
+     when = 'HFT'
+          Let $report_id = 'pdst'
+          break
+     when = 'INT'
+          Let $report_id = 'intl'
+          !*********************************************************************
+          ! duplicate code from up top for intl
+
+             evaluate $benefit_plan
+     when = 'SELECT'
+     when = 'SLCTPT'
+
+                 Let $ecs_contract_id = '716065702'        !active
+                 Let $dcs_contract_id = '015048003'
+                 if &E.state = 'HI'
+                    Let $ecs_contract_id = '716065727'  
+                    Let $dcs_contract_id = '015048027'
+                 end-if   
+
+        break
+     when = 'PLUS'
+     when = 'PLUSPT'
+                 Let $ecs_contract_id = '716065708'        !active
+                 Let $dcs_contract_id = '015048003'
+                 if &E.state = 'HI'
+                    Let $ecs_contract_id = '716065726'  
+                    Let $dcs_contract_id = '015048027'
+                 end-if   
+                 
+        
+        break
+     when = 'BASE'
+     when = 'BASEPT'
+ 
+       
+       when = 'INT'
+                 Let $ecs_contract_id = '716065714'        !active
+                 Let $dcs_contract_id = '015048003'
+                 if &E.state = 'HI'
+                    Let $ecs_contract_id = '716065726'  
+                    Let $dcs_contract_id = '015048027'
+                 end-if              
+        
+
+     when = 'MINI'
+     when = 'MINIPT'
+                 Let $ecs_contract_id = '716065720'        !active
+                 Let $dcs_contract_id = '015048003'
+                 if &E.state = 'HI'
+                    Let $ecs_contract_id = '716065726'  
+                    Let $dcs_contract_id = '015048027'
+                 end-if          
+        break
+   end-evaluate
+          
+          !*********************************************************************
+          break     
+     when = 'SAL'
+          Let $report_id = 'pdst'
+          ! show '*********************** ' &benefit_program
+          break
+     when = 'SNB'
+          Let $report_id = 'pdst'
+          break
+     when = 'SSP'
+          Let $report_id = 'spst'
+          break
+     when = 'USS'
+          Let $report_id = 'spst'
+          break
+     when = 'STN'
+     when = 'SNO'
+     when = 'DIS'
+          Let $report_id = 'spst'
+          break
+     When-Other
+          !Show 'Procedure Write-130'
+          !Show 'Incorrect Paygroup: ' &paygroup '  SSN: ' $eessn ' Last Name: ' $last_name
+          !Show ' '
+ 
+          break
+     End-Evaluate    
+     if &benefit_program = 'CCV'
+    ! show '*********************** 1**' &benefit_program ' ............... ' $eessn
+        Let $report_id = 'ccov'
+    end-if 
+When-Other
+!show '*********************** 2 **' &benefit_program ' ********** ' $eessn 
+     if &benefit_program = 'CCV'
+        Let $report_id = 'ccov'
+     else
+         Let $report_id = 'spst'
+     end-if
+End-Evaluate
+!show '*********************** 3 **' &benefit_program ' ----- ' $eessn
+Let $report_qual_date = '01/01/2008'        !*********************** REMOVE, JUST FOR TESTING ********
+write 1 from
+      $eessn:10          !subscriber SSN
+      $ecs_contract_id:30             !ECS 
+      '130':3              
+      ' ':7        
+      '01':2   
+      'AP':2               !report qualifier code
+      !$report_qual_code:2
+      $report_qual_date:10
+      $report_id:30
+      ' ':406             !spaces
+      
+               
+END-PROCEDURE
+
+BEGIN-PROCEDURE Write-135
+!show 'Cancel: ' $eessn ' - ' $cancel_date
+Add 1 to #total_count
+! *** Medical record ********
+write 1 from
+      $eessn:10          !subscriber SSN
+      $ecs_contract_id:30             !ECS 
+      '135':3            !rec id  
+      ' ':7              !seq nbr
+      '01':2               !coverage count
+      'PPO':3               !insurance code
+      $current_effdt:10    !coverage effdt
+      ' ':3               ! spaces ECS
+      $med_cat_cov:3      !coverage category code
+      ' ':3               !spaces
+      '363':17            !plan area always 363
+      ' ':2               !spaces
+      $cancel_date:10   !cancel date
+      $cov_cancel_cd:2    !cancel code
+      &current_date:10    !report date
+      ' ':10              !spaces
+      $prev_agr_nbr:17    !
+      ' ':358             
+
+! *** Vision record ********
+Add 1 to #total_count
+write 1 from
+      $eessn:10          !subscriber SSN
+      $ecs_contract_id:30             !ECS 
+      '135':3            !rec id  
+      ' ':7              !seq nbr
+      '01':2               !coverage count
+      'PDG':3               !insurance code
+      $current_effdt:10    !coverage effdt
+      ' ':3               ! spaces ECS
+      $med_cat_cov:3      !coverage category code
+      ' ':3               !spaces
+      '363':17            !Plan area always 363
+      ' ':2               !spaces
+      $cancel_date:10   !cancel date
+      $cov_cancel_cd:2    !cancel code
+      &current_date:10    !report date
+      ' ':10              !sapces
+      $prev_agr_nbr:17    !
+      ' ':358            
+
+      ! *** Dental record ********
+Add 1 to #total_count
+write 1 from
+      $eessn:10          !subscriber SSN
+      $dcs_contract_id:30             !ECS 
+      '135':3            !rec id  
+      ' ':7              !seq nbr
+      '01':2               !coverage count
+      'DEN':3               !insurance code
+      $current_effdt:10    !coverage effdt
+      ' ':3               ! spaces ECS
+      $med_cat_cov:3      !coverage category code
+      ' ':3               !spaces
+      '363':17            !Plan area always 363
+      ' ':2               !spaces
+      $cancel_date:10   !cancel date
+      $cov_cancel_cd:2    !cancel code
+      &current_date:10    !report date
+      ' ':10              !sapces
+      $prev_agr_nbr:17    !
+      ' ':358            
+END-PROCEDURE
+
+
+BEGIN-PROCEDURE write-footer
+Add 1 to #total_count
+move #100_count to $100_count '888888888'
+move #total_count to $total_count '888888888'
+!write 1 from
+ !     ' ':40                !40 spaces ECS System
+ !     '900':3               !Rec Identifier
+ !     ' ':7                 !7 spaces ECS
+ !     $total_count:9        
+ !     ' ':9                 !spaces
+ !     $100_count:9
+ !     ' ':423               !spaces
+let $segment_count = edit(#segment_count,'9999999')
+write 1 from
+      'SE'
+      '*'
+      $segment_count
+      '~'
+      
+write 1 from
+      'GE'
+      '*'
+      '1'
+   	  '~'
+Let $icn = &header_date || &header_time   
+write 1 from
+      'IEA'
+      '*'
+      '1'
+      '*'
+      $icn
+      '~'       
+show 'segment count: ' #segment_count_ucci
+!*************************************************************
+!**** UCCCI FILE *********************************************
+!add 1 to #segment_count_ucci
+!let $segment_count_ucci = edit(#segment_count_ucci,'8999999')
+!write 2 from
+!      'SE'
+!      '*'
+ !     $segment_count_ucci
+!      '*'
+!      &header_time
+ !     '~'
+     
+!write 2 from
+!      'GE'
+!      '*'
+ !     '1'
+!      '*'
+!      '1'
+!   	  '~'
+ Let $icn = &header_date || &header_time   
+!write 2 from
+!      'IEA'
+!      '*'
+!      '1'
+!      '*'
+!      $icn:9
+!      '~'       
+
+!**** UCCI FILE END ******************************************
+      
+      
+          
+      print 'Employee Count: '           (0,+2,20)
+      print $100_count                   (0,0,40)
+      print ' '                          (0,+1,31)
+      print 'Total Rows Written: '       (0,0,20)
+      print $total_count                   (0,0,40)
+      
+END-PROCEDURE write-footer
+BEGIN-PROCEDURE Get-US-Address
+!*** CRP HCMS1407 2/22/2017 use mail address
+!*** created new procedure to use MAIL address for non secure countries
+BEGIN-SELECT
+AA.ADDRESS1
+AA.ADDRESS2
+AA.ADDRESS3
+AA.city
+AA.state
+AA.COUNTRY
+AA.POSTAL
+
+!   show 'IN GET US ADDRESS'
+  move &AA.city to $city
+  move &AA.state to $state
+EE.state
+EE.country_other
+
+  !--Format address and telephone information
+
+   Let $address = rtrim(&AA.ADDRESS1,' ')
+   Let $address2 = rtrim(&AA.ADDRESS2,' ')
+   Let $address3 = rtrim(&AA.ADDRESS3,' ')
+ 
+   do format-phone-zip (&AA.POSTAL, $POSTAL)
+   Let $POSTAL = rpad($POSTAL, 9, '0')
+   Let $country_cd = rtrim(&EE.country_other,' ')
+  #debugab show 'COUNTRY ' $country_cd
+
+FROM PS_Addresses AA,  PS_Employees2 EE				
+WHERE AA.EMPLID = $emplid
+     AND AA.EMPLID = EE.emplid
+     AND AA.ADDRESS_TYPE = 'MAIL'   
+     AND AA.EFF_STATUS = 'A'
+     AND AA.EFFDT =
+        (SELECT MAX(EFFDT) FROM PS_ADDRESSES WHERE
+            EMPLID    = AA.EMPLID AND
+            ADDRESS_TYPE = 'MAIL' AND     
+            EFF_STATUS = 'A' AND
+            EFFDT <= SYSDATE + 60) 
+
+
+END-SELECT
+END-PROCEDURE Get-US-Address
+
+
+
+#Include 'Reset.sqc'     !Reset printer procedure
+#Include 'CurDtTim.sqc'  !Get-Current-DateTime procedure
+#Include 'DateTime.sqc'  !Routines for date and time formatting
+#Include 'Number.sqc'    !Routines to format numbers
+#Include 'PhoneZip.sqc'  !Routines to format phone and POSTAL codes
+#include 'prcsapi.sqc'   !Update Process Request API
+#include 'prcsdef.sqc'   !Update Process Request variable declaration
+#include 'getlocnm.sqc'  !Get-Location-Name procedure
+#include 'cccfile.sqc'      !Find directory of report files for process scheduler issues
+
