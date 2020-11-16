@@ -1,0 +1,6 @@
+call cblcrint PAPCSSEC
+call cblcrint PAPCSRVC
+call cblcrint PAPCPPAR
+call cblcrint PAPCRCTL
+call cblcrint PAPPRCTL
+call cblcrint PAPPPYMT
