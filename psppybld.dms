@@ -1,0 +1,124 @@
+--
+--
+--                                                               
+-- This software and related documentation are provided under a  
+-- license agreement containing restrictions on use and          
+-- disclosure and are protected by intellectual property         
+-- laws. Except as expressly permitted in your license agreement 
+-- or allowed by law, you may not use, copy, reproduce,          
+-- translate, broadcast, modify, license, transmit, distribute,  
+-- exhibit, perform, publish or display any part, in any form or 
+-- by any means. Reverse engineering, disassembly, or            
+-- decompilation of this software, unless required by law for    
+-- interoperability, is prohibited.                              
+-- The information contained herein is subject to change without 
+-- notice and is not warranted to be error-free. If you find any 
+-- errors, please report them to us in writing.                  
+--                                                               
+-- Copyright (C) 1988, 2009, Oracle and/or its affiliates.       
+-- All Rights Reserved.                                          
+--
+DELETE FROM PS_SQLSTMT_TBL WHERE PGM_NAME = 'PSPPYBLD';
+--
+
+STORE PSPPYBLD_S_RUNCTL
+SELECT
+ RUN_ID
+FROM PS_PAYSHEET_RUNCTL
+WHERE OPRID=:1
+ AND RUN_CNTL_ID=:2
+;
+STORE PSPPYBLD_D_RUNCTL
+DELETE
+FROM PS_PAYSHEET_RUNCTL
+WHERE OPRID=:1
+ AND RUN_CNTL_ID=:2
+;
+STORE PSPPYBLD_S_CAL
+SELECT
+ A.COMPANY
+,A.PAYGROUP
+,A.PAY_END_DT
+,A.AGGR_ID
+FROM PS_PAY_CALENDAR A
+,PS_PAYGROUP_TBL B
+WHERE A.RUN_ID=:1
+ AND A.PAY_CONFIRM_START='N'
+ AND A.COMPANY=B.COMPANY
+ AND A.PAYGROUP=B.PAYGROUP
+ AND B.EFFDT=
+            (SELECT MAX(C.EFFDT)
+            FROM PS_PAYGROUP_TBL C
+            WHERE B.COMPANY=C.COMPANY
+             AND B.PAYGROUP=C.PAYGROUP
+             AND C.EFFDT<=A.PAY_END_DT)
+ AND (A.PAY_SHEETS_RUN='N'
+   OR B.AUTO_PAYSHEET_UPD='Y')
+ORDER BY
+ A.COMPANY ASC
+,A.PAYGROUP ASC
+;
+STORE PSPPYBLD_S_CALOFF
+SELECT
+ A.RUN_ID
+,B.COUNTRY
+,A.AGGR_ID
+,A.PAY_OFF_CYCLE_CAL
+FROM PS_PAY_CALENDAR A
+,PS_PAYGROUP_TBL B
+WHERE A.COMPANY=:1
+ AND A.PAYGROUP=:2
+ AND A.PAY_END_DT=:3
+ AND A.COMPANY=B.COMPANY
+ AND A.PAYGROUP=B.PAYGROUP
+ AND B.EFFDT=
+            (SELECT MAX(C.EFFDT)
+            FROM PS_PAYGROUP_TBL C
+            WHERE B.COMPANY=C.COMPANY
+             AND B.PAYGROUP=C.PAYGROUP
+             AND C.EFFDT<=A.PAY_END_DT)
+;
+STORE PSPPYBLD_S_CALCONT
+SELECT
+ A.COMPANY
+,A.PAYGROUP
+,A.PAY_END_DT
+,A.AGGR_ID
+FROM PS_PAY_CALENDAR A
+,PS_PAYGROUP_TBL B
+WHERE A.RUN_ID=:1
+ AND (A.COMPANY>:2
+   OR (A.COMPANY=:3
+   AND A.PAYGROUP>:4))
+ AND A.PAY_CONFIRM_START='N'
+ AND A.COMPANY=B.COMPANY
+ AND A.PAYGROUP=B.PAYGROUP
+ AND B.EFFDT=
+            (SELECT MAX(C.EFFDT)
+            FROM PS_PAYGROUP_TBL C
+            WHERE B.COMPANY=C.COMPANY
+             AND B.PAYGROUP=C.PAYGROUP
+             AND C.EFFDT<=A.PAY_END_DT)
+ AND (A.PAY_SHEETS_RUN='N'
+   OR B.AUTO_PAYSHEET_UPD='Y')
+ORDER BY
+ A.COMPANY ASC
+,A.PAYGROUP ASC
+;
+STORE PSPPYBLD_U_CAL
+UPDATE
+ PS_PAY_CALENDAR
+SET
+ PAY_SHEETS_RUN='Y'
+WHERE COMPANY=:1
+ AND PAYGROUP=:2
+ AND PAY_END_DT=:3
+;
+STORE PSPPYBLD_S_CNT_MSG
+SELECT
+ 'X'
+FROM PS_PAY_MESSAGE A
+WHERE A.PRCSINSTANCE=:1
+AND A.COMPANY = :2
+AND A.PAYGROUP = :3
+;

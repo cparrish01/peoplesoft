@@ -1,0 +1,197 @@
+--
+--
+--                                                               
+-- This software and related documentation are provided under a  
+-- license agreement containing restrictions on use and          
+-- disclosure and are protected by intellectual property         
+-- laws. Except as expressly permitted in your license agreement 
+-- or allowed by law, you may not use, copy, reproduce,          
+-- translate, broadcast, modify, license, transmit, distribute,  
+-- exhibit, perform, publish or display any part, in any form or 
+-- by any means. Reverse engineering, disassembly, or            
+-- decompilation of this software, unless required by law for    
+-- interoperability, is prohibited.                              
+-- The information contained herein is subject to change without 
+-- notice and is not warranted to be error-free. If you find any 
+-- errors, please report them to us in writing.                  
+--                                                               
+-- Copyright (C) 1988, 2009, Oracle and/or its affiliates.       
+-- All Rights Reserved.                                          
+--
+DELETE FROM PS_SQLSTMT_TBL WHERE PGM_NAME = 'PSPCNFRM';
+--
+STORE PSPCNFRM_S_RUNCTL
+SELECT
+ RUN_ID
+,PROCESS_ON_OFF
+,COMPANY
+,PAYGROUP
+,PAY_END_DT
+,PAGE_NUM
+,PAGE_NUM_THRU
+,REVERSALS
+FROM PS_PAY_CONF_RUNCTL
+WHERE OPRID=:1
+ AND RUN_CNTL_ID=:2
+;
+STORE PSPCNFRM_D_RUNCTL
+DELETE
+FROM PS_PAY_CONF_RUNCTL
+WHERE OPRID=:1
+ AND RUN_CNTL_ID=:2
+;
+STORE PSPCNFRM_S_CALOFF
+SELECT
+ RUN_ID
+,PAY_OFF_CYCLE_CAL
+FROM PS_PAY_CALENDAR
+WHERE COMPANY=:1
+ AND PAYGROUP=:2
+ AND PAY_END_DT=:3
+;
+STORE PSPCNFRM_S_PAGE
+SELECT
+ PAGE_NUM
+,COMPANY
+,PAYGROUP
+,PAY_END_DT
+,OFF_CYCLE
+FROM PS_PAY_CHECK
+WHERE COMPANY=:1
+ AND PAYGROUP=:2
+ AND PAY_END_DT=:3
+ AND OFF_CYCLE='Y'
+ AND PAGE_NUM>:4
+ AND PAYCHECK_STATUS IN ('C','V')
+ AND PAYCHECK_OPTION='R'
+ORDER BY
+ COMPANY ASC
+,PAYGROUP ASC
+,PAY_END_DT ASC
+,OFF_CYCLE ASC
+,PAGE_NUM ASC
+;
+STORE PSPCNFRM_S_CAL
+SELECT
+ COMPANY
+,PAYGROUP
+,PAY_END_DT
+,PAY_OFF_CYCLE_CAL
+FROM PS_PAY_CALENDAR
+WHERE RUN_ID=:1
+ AND PAY_CONFIRM_RUN='N'
+ORDER BY
+ COMPANY ASC
+,PAYGROUP ASC
+;
+STORE PSPCNFRM_S_CALOFF2
+SELECT
+ COMPANY
+,PAYGROUP
+,PAY_END_DT
+,PAY_OFF_CYCLE_CAL
+FROM PS_PAY_CALENDAR
+WHERE RUN_ID=:1
+ AND PAY_OFF_CYCLE_CLS='N'
+ORDER BY
+ COMPANY ASC
+,PAYGROUP ASC
+;
+STORE PSPCNFRM_S_OFFPAGE
+SELECT
+ 'X'
+FROM PS_PAY_PAGE
+WHERE COMPANY=:1
+ AND PAYGROUP=:2
+ AND PAY_END_DT=:3
+ AND OFF_CYCLE='Y'
+ AND PAGE_NUM=:4
+;
+STORE PSPCNFRM_S_CALCONT
+SELECT
+ COMPANY
+,PAYGROUP
+,PAY_END_DT
+,PAY_OFF_CYCLE_CAL
+FROM PS_PAY_CALENDAR
+WHERE RUN_ID=:1
+ AND (COMPANY>:2
+   OR (COMPANY=:3
+   AND PAYGROUP>:4))
+ AND PAY_CONFIRM_RUN='N'
+ORDER BY
+ COMPANY ASC
+,PAYGROUP ASC
+;
+STORE PSPCNFRM_S_CALCNT2
+SELECT
+ COMPANY
+,PAYGROUP
+,PAY_END_DT
+,PAY_OFF_CYCLE_CAL
+FROM PS_PAY_CALENDAR
+WHERE RUN_ID=:1
+ AND (COMPANY>:2
+   OR (COMPANY=:3
+   AND PAYGROUP>:4))
+ AND PAY_OFF_CYCLE_CLS='N'
+ORDER BY
+ COMPANY ASC
+,PAYGROUP ASC
+;
+STORE PSPCNFRM_S_OFF
+SELECT
+ 'X'
+FROM PS_PAY_CHECK
+WHERE COMPANY=:1
+ AND PAYGROUP=:2
+ AND PAY_END_DT=:3
+ AND OFF_CYCLE='Y'
+ AND PAYCHECK_STATUS IN ('C','V')
+;
+STORE PSPCNFRM_U_CALOFF
+UPDATE
+ PS_PAY_CALENDAR
+SET
+ PAY_OFF_CYCLE=:1
+WHERE COMPANY=:2
+ AND PAYGROUP=:3
+ AND PAY_END_DT=:4
+;
+STORE PSPCNFRM_U_CAL
+UPDATE
+ PS_PAY_CALENDAR
+SET
+ PAY_CONFIRM_RUN='Y'
+WHERE COMPANY=:1
+ AND PAYGROUP=:2
+ AND PAY_END_DT=:3
+;
+STORE PSPCNFRM_S_CNT_MSG
+SELECT
+ 'X'
+FROM PS_PAY_MESSAGE A
+WHERE A.PRCSINSTANCE=:1
+AND A.COMPANY = :2
+AND A.PAYGROUP = :3
+;
+STORE PSPCNFRM_D_RPDET
+DELETE FROM PS_PYRE_DETAIL
+WHERE RUN_ID = :1
+  AND OFF_CYCLE=:2
+;
+STORE PSPCNFRM_D_INVLD
+DELETE FROM PS_PYRE_INVALID
+WHERE RUN_ID = :1
+AND OFF_CYCLE=:2
+;
+STORE PSPCNFRM_D_RPRUN
+DELETE FROM PS_PYRE_RUNID_HDR
+WHERE RUN_ID = :1
+  AND OFF_CYCLE = :2
+;
+STORE PSPCNFRM_D_RPHDR
+DELETE FROM PS_PYRE_HEADER
+WHERE RUN_ID = :1
+AND OFF_CYCLE=:2
+;

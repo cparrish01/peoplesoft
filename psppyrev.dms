@@ -1,0 +1,79 @@
+--
+--
+--
+-- This software and related documentation are provided under a  
+-- license agreement containing restrictions on use and          
+-- disclosure and are protected by intellectual property         
+-- laws. Except as expressly permitted in your license agreement 
+-- or allowed by law, you may not use, copy, reproduce,          
+-- translate, broadcast, modify, license, transmit, distribute,  
+-- exhibit, perform, publish or display any part, in any form or 
+-- by any means. Reverse engineering, disassembly, or            
+-- decompilation of this software, unless required by law for    
+-- interoperability, is prohibited.                              
+-- The information contained herein is subject to change without 
+-- notice and is not warranted to be error-free. If you find any 
+-- errors, please report them to us in writing.                  
+--                                                               
+-- Copyright (C) 1988, 2009, Oracle and/or its affiliates.       
+-- All Rights Reserved.                                          
+--
+DELETE FROM PS_SQLSTMT_TBL WHERE PGM_NAME = 'PSPPYREV';
+--
+
+STORE PSPPYREV_S_RUNCTL
+SELECT
+ COMPANY
+,PAYGROUP
+,PAY_END_DT
+FROM PS_PAY_REV_RUNCTL
+WHERE OPRID=:1
+ AND RUN_CNTL_ID=:2
+;
+STORE PSPPYREV_D_RUNCTL
+DELETE
+FROM PS_PAY_REV_RUNCTL
+WHERE OPRID=:1
+ AND RUN_CNTL_ID=:2
+;
+STORE PSPPYREV_S_CAL
+SELECT
+ RUN_ID
+FROM PS_PAY_CALENDAR
+WHERE COMPANY=:1
+ AND PAYGROUP=:2
+ AND PAY_END_DT=:3
+;
+STORE PSPPYREV_D_CKREV
+DELETE
+FROM PS_PAY_CHECK_REVRS
+WHERE OPRID=:1
+ AND RUN_CNTL_ID=:2
+;
+STORE PSPPYREV_S_OFF
+SELECT
+ 'X'
+FROM PS_PAY_CHECK
+WHERE COMPANY=:1
+ AND PAYGROUP=:2
+ AND PAY_END_DT=:3
+ AND OFF_CYCLE='Y'
+ AND PAYCHECK_STATUS IN ('C','V')
+;
+STORE PSPPYREV_U_CAL
+UPDATE
+ PS_PAY_CALENDAR
+SET
+ PAY_OFF_CYCLE=:1
+WHERE COMPANY=:2
+ AND PAYGROUP=:3
+ AND PAY_END_DT=:4
+;
+STORE PSPPYREV_S_CNT_MSG
+SELECT
+ 'X'
+FROM PS_PAY_MESSAGE A
+WHERE A.PRCSINSTANCE=:1
+AND A.COMPANY = :2
+AND A.PAYGROUP = :3
+;
