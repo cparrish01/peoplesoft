@@ -1,2 +1,2 @@
 # peoplesoft
-peoplesoftr sqrs, peoplecode
+Cobol src
